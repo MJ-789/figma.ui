@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.Python
+venv/
+env/
+
+# 环境变量
+.env
+
+# 测试输出
+screenshots/
+reports/
+recordings/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
