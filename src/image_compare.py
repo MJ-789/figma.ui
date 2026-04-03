@@ -76,7 +76,7 @@ class ImageCompare:
 
         similarity = 100 - (diff_sum / max_diff * 100)
 
-        return round(similarity, 2)
+        return float(round(float(similarity), 2))
 
     # ------------------------------------------------
     # MSE
@@ -95,7 +95,7 @@ class ImageCompare:
 
         mse = np.mean((img1_array.astype("float") - img2_array.astype("float")) ** 2)
 
-        return round(mse, 4)
+        return float(round(float(mse), 4))
 
     # ------------------------------------------------
     # SSIM
@@ -223,10 +223,10 @@ class ImageCompare:
         img2 = Image.open(img2_path)
 
         report = {
-            "similarity": similarity,
-            "mse": mse,
-            "threshold": self.threshold,
-            "passed": similarity >= self.threshold,
+            "similarity": float(similarity),
+            "mse": float(mse),
+            "threshold": float(self.threshold),
+            "passed": bool(similarity >= self.threshold),
             "image1": {
                 "path": str(img1_path),
                 "size": img1.size

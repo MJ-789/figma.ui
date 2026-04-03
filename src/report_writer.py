@@ -3,9 +3,17 @@ v1.1.0 结构化报告输出
 """
 
 import json
-from datetime import datetime, UTC
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+
+# Python 3.11+ has datetime.UTC; 3.10 需用 timezone.utc
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+
+    UTC = timezone.utc
 
 
 class ReportWriter:

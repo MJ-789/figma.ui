@@ -25,7 +25,7 @@ figma-ui-automation/
 
 ## 版本管理
 
-- 当前项目版本: `1.1.0`（见 `VERSION`）
+- 当前项目版本: `1.1.3`（见 `VERSION`）
 - 变更记录文件: `CHANGELOG.md`
 - 从 `1.0.0` 开始，每次修改都要新增版本条目并说明：
   - 变更内容
@@ -51,3 +51,9 @@ figma-ui-automation/
 - `CRAWL_EXCLUDE_KEYWORDS=logout,signout,delete,remove`
 
 结构化结果输出到：`reports/json/run_result.json`
+
+## Pytest 与 Playwright 说明
+
+本项目使用 **手写 `sync_playwright()`**（`WebCapture`），与 `pytest-playwright` 插件自带的 asyncio 机制会冲突。因此 `pytest.ini` 中已加入 `-p no:playwright` 禁用该插件。若你需要使用插件提供的 `page` fixture，可去掉该参数并改为异步用例或统一一种用法。
+
+跨浏览器：未安装 Firefox 时，`test_homepage_firefox` 会自动跳过；安装命令：`playwright install firefox`。

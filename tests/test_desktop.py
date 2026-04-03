@@ -27,7 +27,7 @@ class TestDesktop:
 
     def _run_ui_test(self, test_name: str, page_config: dict, browser_type: str = "chromium"):
         print(f"\n{'=' * 70}")
-        print(f"🧪 测试: {test_name}")
+        print(f"[TEST] {test_name}")
         print(f"{'=' * 70}")
 
         figma_path = Config.SCREENSHOTS_DIR / "figma" / f"{test_name}.png"
@@ -35,13 +35,13 @@ class TestDesktop:
         diff_path = Config.REPORTS_DIR / "images" / f"{test_name}_diff.png"
         sidebyside_path = Config.REPORTS_DIR / "images" / f"{test_name}_compare.png"
 
-        print(f"\n[1/5] 📥 获取Figma设计稿...")
+        print(f"\n[1/5] 获取Figma设计稿...")
         node_id = page_config["figma_node"]
         print(f"      NodeID: {node_id}")
         self.figma.save_node_to_file(node_id=node_id, output_path=figma_path, scale=2)
-        print(f"      ✓ 设计稿已保存: {figma_path}")
+        print(f"      [OK] 设计稿已保存: {figma_path}")
 
-        print(f"\n[2/5] 📸 截取网站页面...")
+        print(f"\n[2/5] 截取网站页面...")
         full_url = Config.BASE_URL + page_config["url"]
         print(f"      URL: {full_url}")
         print(f"      浏览器: {browser_type}")
@@ -52,7 +52,7 @@ class TestDesktop:
                 try:
                     capture.page.wait_for_selector(page_config["wait_for"], timeout=10000, state="visible")
                 except Exception:
-                    print(f"      ⚠️ 等待元素超时: {page_config['wait_for']}")
+                    print(f"      [WARN] 等待元素超时: {page_config['wait_for']}")
 
             hide_selectors = page_config.get(
                 "hide_elements",
@@ -63,21 +63,21 @@ class TestDesktop:
                 capture.page.set_viewport_size(page_config["viewport"])
             capture.page.screenshot(path=str(web_path), full_page=True)
 
-        print(f"      ✓ 网站截图已保存: {web_path}")
-        print(f"\n[3/5] 🔍 进行视觉对比...")
+        print(f"      [OK] 网站截图已保存: {web_path}")
+        print(f"\n[3/5] 进行视觉对比...")
         similarity = self.comparator.calculate_similarity(figma_path, web_path)
         print(f"      相似度: {similarity}%")
         print(f"      阈值: {Config.SIMILARITY_THRESHOLD}%")
 
-        print(f"\n[4/5] 🎨 生成差异报告...")
+        print(f"\n[4/5] 生成差异报告...")
         self.comparator.generate_diff_image(figma_path, web_path, diff_path)
         self.comparator.generate_side_by_side(
             figma_path, web_path, sidebyside_path, labels=("Figma设计", browser_type.upper())
         )
-        print(f"      ✓ 差异图: {diff_path}")
-        print(f"      ✓ 对比图: {sidebyside_path}")
+        print(f"      [OK] 差异图: {diff_path}")
+        print(f"      [OK] 对比图: {sidebyside_path}")
 
-        print(f"\n[5/5] 📊 生成测试报告...")
+        print(f"\n[5/5] 生成测试报告...")
         report = self.comparator.get_comparison_report(figma_path, web_path)
         report.update(
             {
@@ -91,7 +91,7 @@ class TestDesktop:
         )
         print(f"      相似度: {report['similarity']}%")
         print(f"      MSE: {report['mse']}")
-        print(f"      结果: {'✅ PASS' if report['passed'] else '❌ FAIL'}")
+        print(f"      结果: {'PASS' if report['passed'] else 'FAIL'}")
 
         ReportWriter.write_run_result(
             output_path=Config.JSON_REPORT_PATH,
@@ -102,7 +102,7 @@ class TestDesktop:
         )
 
         assert report["passed"], (
-            f"\n❌ UI一致性不达标!\n"
+            f"\n[FAIL] UI一致性不达标\n"
             f"   相似度: {similarity}%\n"
             f"   阈值: {Config.SIMILARITY_THRESHOLD}%\n"
             f"   差异图: {diff_path}"
@@ -168,7 +168,7 @@ class TestCrawlDiscovery:
             },
             page_results=discovered,
         )
-        print(f"\n📄 JSON报告已生成: {result_path}")
+        print(f"\n[OK] JSON报告已生成: {result_path}")
 
 
 if __name__ == "__main__":
