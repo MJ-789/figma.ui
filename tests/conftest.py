@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 
 import pytest
+from config.config import Config
 
 
 def _playwright_firefox_installed() -> bool:
@@ -37,6 +38,21 @@ def _playwright_firefox_installed() -> bool:
         if exe.is_file():
             return True
     return False
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """测试全部结束后，自动生成可视化 HTML 报告。"""
+    # 只要有任意一份 JSON 结果就生成报告
+    has_pixel   = Config.JSON_REPORT_PATH.exists()
+    has_element = Config.ELEMENT_DIFF_PATH.exists()
+    if not has_pixel and not has_element:
+        return
+    try:
+        from src.html_reporter import generate_report
+        path = generate_report()
+        print(f"\n📄 可视化报告: {path}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n[WARN] 可视化报告生成失败: {exc}")
 
 
 def pytest_collection_modifyitems(config, items):

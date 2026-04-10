@@ -45,8 +45,9 @@ load_dotenv()
 
 class Config:
     BASE_DIR = Path(__file__).parent.parent
-    SCREENSHOTS_DIR = BASE_DIR / "screenshots"
     REPORTS_DIR = BASE_DIR / "reports"
+    # 截图统一存放在 reports/ 下，与差异图、JSON、HTML 集中在同一结果目录
+    SCREENSHOTS_DIR = REPORTS_DIR / "screenshots"
 
     FIGMA_ACCESS_TOKEN = os.getenv('FIGMA_ACCESS_TOKEN')
     FIGMA_FILE_KEY = os.getenv('FIGMA_FILE_KEY')
@@ -73,6 +74,8 @@ class Config:
     DEFAULT_BROWSER = os.getenv('DEFAULT_BROWSER', 'chromium')
     HEADLESS = os.getenv('HEADLESS', 'true').lower() == 'true'
     JSON_REPORT_PATH = REPORTS_DIR / "json" / "run_result.json"
+    ELEMENT_DIFF_PATH = REPORTS_DIR / "json" / "element_diff.json"
+    HTML_REPORT_PATH = REPORTS_DIR / "report.html"
 
     # v1.1.0: 多页面爬取配置
     CRAWL_ENABLED = os.getenv('CRAWL_ENABLED', 'true').lower() == 'true'
@@ -117,9 +120,11 @@ class Config:
 
     @classmethod
     def setup_directories(cls):
-        for directory in [cls.SCREENSHOTS_DIR / "figma",
-                          cls.SCREENSHOTS_DIR / "web",
-                          cls.REPORTS_DIR / "html",
-                          cls.REPORTS_DIR / "images",
-                          cls.REPORTS_DIR / "json"]:
+        for directory in [
+            cls.SCREENSHOTS_DIR / "figma",
+            cls.SCREENSHOTS_DIR / "web",
+            cls.REPORTS_DIR / "html",
+            cls.REPORTS_DIR / "images",
+            cls.REPORTS_DIR / "json",
+        ]:
             directory.mkdir(parents=True, exist_ok=True)
