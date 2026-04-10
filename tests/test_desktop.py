@@ -148,12 +148,24 @@ class TestDesktop:
         print(f"      MSE: {report['mse']}")
         print(f"      结果: {'PASS' if report['passed'] else 'FAIL'}")
 
+        # 累积写入所有页面结果（不覆盖上一条）
+        existing = []
+        if Config.JSON_REPORT_PATH.exists():
+            import json as _json
+            try:
+                existing = _json.loads(Config.JSON_REPORT_PATH.read_text(encoding="utf-8")).get("page_results", [])
+            except Exception:
+                existing = []
+        # 替换同名条目或追加
+        existing = [r for r in existing if r.get("page_name") != test_name]
+        existing.append(report)
+
         ReportWriter.write_run_result(
             output_path=Config.JSON_REPORT_PATH,
             version=self.version,
             base_url=Config.BASE_URL,
-            crawl_summary={"enabled": False, "discovered_pages": 1, "max_depth": 0, "max_pages": 1},
-            page_results=[report],
+            crawl_summary={"enabled": False, "discovered_pages": len(Config.TEST_PAGES), "max_depth": 0, "max_pages": len(Config.TEST_PAGES)},
+            page_results=existing,
         )
 
         assert report["passed"], (
@@ -163,10 +175,18 @@ class TestDesktop:
             f"   差异图: {diff_path}"
         )
 
-    def test_homepage_chromium(self):
+    # ── 动态生成：PAGE_MAP 里每个页面都跑一次 ──────────────────────────
+    @pytest.mark.parametrize(
+        "page_key,page_config",
+        list(Config.TEST_PAGES.items()),
+        ids=[cfg.get("_label", k) for k, cfg in Config.TEST_PAGES.items()],
+    )
+    def test_page_chromium(self, page_key, page_config):
+        label = page_config.get("_label", page_key)
+        test_name = f"{label}_chromium".replace(" ", "_").replace("/", "_")
         self._run_ui_test(
-            test_name="homepage_chromium",
-            page_config=Config.TEST_PAGES["homepage"],
+            test_name=test_name,
+            page_config=page_config,
             browser_type="chromium",
         )
 

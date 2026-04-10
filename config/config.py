@@ -96,34 +96,70 @@ class Config:
         ).split(',') if p.strip()
     ]
 
-    # 首页测试页配置（从 .env 读取，避免改代码）
-    _HOMEPAGE_FIGMA_NODE    = os.getenv('HOMEPAGE_FIGMA_NODE', '15661-162')
-    _HOMEPAGE_URL           = os.getenv('HOMEPAGE_URL', '/')
-    _HOMEPAGE_WAIT_FOR      = os.getenv('HOMEPAGE_WAIT_FOR', '.main-content')
-    _HOMEPAGE_WIDTH         = int(os.getenv('HOMEPAGE_WIDTH', '1440'))
-    _HOMEPAGE_HEIGHT        = int(os.getenv('HOMEPAGE_HEIGHT', '900'))
+    # 全局视口默认值
+    _DEFAULT_WIDTH  = int(os.getenv('HOMEPAGE_WIDTH',  '1920'))
+    _DEFAULT_HEIGHT = int(os.getenv('HOMEPAGE_HEIGHT', '900'))
 
-    TEST_PAGES = {
-        'homepage': {
-            'figma_node': _HOMEPAGE_FIGMA_NODE,
-            'url':        _HOMEPAGE_URL,
-            'wait_for':   _HOMEPAGE_WAIT_FOR,
-            'viewport': {
-                'width':  _HOMEPAGE_WIDTH,
-                'height': _HOMEPAGE_HEIGHT,
-            },
-            # v1.2.0: 元素属性对比映射表
-            # key   = Figma 设计稿中的 Layer 名称（区分大小写）
-            # value = 页面中对应元素的 CSS 选择器
-            # 未在此处列出的 Figma TEXT 节点会尝试通过文本内容自动匹配
-            'element_map': {
-                # 示例（请根据实际设计稿和页面结构调整）：
-                # "Button/Primary": "button.btn-primary",
-                # "Nav/Logo":       "header .logo",
-                # "Hero/Title":     "h1.hero-title",
+    @classmethod
+    def _parse_page_map(cls) -> dict:
+        """
+        解析 .env 中的 PAGE_MAP，构建 TEST_PAGES 字典。
+
+        PAGE_MAP 格式（多条用英文逗号分隔）：
+            标签|figma_node|网站路径
+        示例：
+            PAGE_MAP=Home|15661-163|/ , category|15661-164|/list/Finance
+
+        若 PAGE_MAP 未设置，退回到旧版单页配置（HOMEPAGE_FIGMA_NODE 等）。
+        """
+        raw = os.getenv('PAGE_MAP', '').strip()
+        if raw:
+            pages = {}
+            for entry in raw.split(','):
+                parts = [p.strip() for p in entry.strip().split('|')]
+                if len(parts) != 3:
+                    continue
+                label, node_id, url_path = parts
+                if not label or not node_id:
+                    continue
+                # 把标签转为安全 key（小写 + 下划线）
+                key = label.lower().replace(' ', '_').replace('/', '_')
+                pages[key] = {
+                    'figma_node': node_id,
+                    'url':        url_path,
+                    'wait_for':   '',          # 不等待特定元素（避免误判）
+                    'viewport': {
+                        'width':  cls._DEFAULT_WIDTH,
+                        'height': cls._DEFAULT_HEIGHT,
+                    },
+                    'element_map': {},
+                    '_label': label,           # 原始标签，供报告使用
+                }
+            if pages:
+                return pages
+
+        # 兼容旧版单页配置
+        return {
+            'homepage': {
+                'figma_node': os.getenv('HOMEPAGE_FIGMA_NODE', '15661-163'),
+                'url':        os.getenv('HOMEPAGE_URL', '/'),
+                'wait_for':   os.getenv('HOMEPAGE_WAIT_FOR', ''),
+                'viewport': {
+                    'width':  cls._DEFAULT_WIDTH,
+                    'height': cls._DEFAULT_HEIGHT,
+                },
+                'element_map': {},
+                '_label': 'homepage',
             }
         }
-    }
+
+    # TEST_PAGES 由 PAGE_MAP 动态生成
+    TEST_PAGES: dict = {}   # 占位，实际值在类定义后填充
+
+    @classmethod
+    def build_test_pages(cls):
+        """（重新）从环境变量构建 TEST_PAGES，load_dotenv 后调用一次即可。"""
+        cls.TEST_PAGES = cls._parse_page_map()
 
     @classmethod
     def setup_directories(cls):
@@ -135,3 +171,7 @@ class Config:
             cls.REPORTS_DIR / "json",
         ]:
             directory.mkdir(parents=True, exist_ok=True)
+
+
+# 模块加载时立即从环境变量构建 TEST_PAGES
+Config.build_test_pages()
