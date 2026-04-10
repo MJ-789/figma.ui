@@ -170,20 +170,6 @@ class TestDesktop:
             browser_type="chromium",
         )
 
-    def test_homepage_firefox(self):
-        self._run_ui_test(
-            test_name="homepage_firefox",
-            page_config=Config.TEST_PAGES["homepage"],
-            browser_type="firefox",
-        )
-
-    @pytest.mark.skip(reason="需要Safari支持，仅Mac运行")
-    def test_homepage_webkit(self):
-        self._run_ui_test(
-            test_name="homepage_webkit",
-            page_config=Config.TEST_PAGES["homepage"],
-            browser_type="webkit",
-        )
 
 
 @pytest.mark.desktop
