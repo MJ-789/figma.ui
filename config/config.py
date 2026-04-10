@@ -96,14 +96,21 @@ class Config:
         ).split(',') if p.strip()
     ]
 
+    # 首页测试页配置（从 .env 读取，避免改代码）
+    _HOMEPAGE_FIGMA_NODE    = os.getenv('HOMEPAGE_FIGMA_NODE', '15661-162')
+    _HOMEPAGE_URL           = os.getenv('HOMEPAGE_URL', '/')
+    _HOMEPAGE_WAIT_FOR      = os.getenv('HOMEPAGE_WAIT_FOR', '.main-content')
+    _HOMEPAGE_WIDTH         = int(os.getenv('HOMEPAGE_WIDTH', '1440'))
+    _HOMEPAGE_HEIGHT        = int(os.getenv('HOMEPAGE_HEIGHT', '900'))
+
     TEST_PAGES = {
         'homepage': {
-            'figma_node': '12539:1073',
-            'url': '/',
-            'wait_for': '.main-content',
+            'figma_node': _HOMEPAGE_FIGMA_NODE,
+            'url':        _HOMEPAGE_URL,
+            'wait_for':   _HOMEPAGE_WAIT_FOR,
             'viewport': {
-                'width': 1440,
-                'height': 900
+                'width':  _HOMEPAGE_WIDTH,
+                'height': _HOMEPAGE_HEIGHT,
             },
             # v1.2.0: 元素属性对比映射表
             # key   = Figma 设计稿中的 Layer 名称（区分大小写）
