@@ -60,6 +60,19 @@ class FigmaClient:
         self._file_cache = None
 
     # =====================================================
+    # 工具
+    # =====================================================
+
+    @staticmethod
+    def _normalize_node_id(node_id: str) -> str:
+        """
+        统一节点 ID 格式为冒号形式（Figma API 响应使用的格式）。
+        Figma URL 里是短横线：15661-163
+        Figma API 响应里是冒号：  15661:163
+        """
+        return node_id.replace("-", ":")
+
+    # =====================================================
     # 基础API
     # =====================================================
 
@@ -189,12 +202,13 @@ class FigmaClient:
         调用 /v1/files/{key}/nodes?ids={node_id}，
         返回 nodes[node_id]["document"] 节点对象。
         """
+        node_id = self._normalize_node_id(node_id)
         url = f"{self.base_url}/files/{self.file_key}/nodes"
         data = self._get(url, params={"ids": node_id})
         nodes = data.get("nodes", {})
         if node_id not in nodes:
             raise RuntimeError(
-                f"节点 {node_id} 不在响应中，请确认 node_id 格式正确（如 '12539:1073'）"
+                f"节点 {node_id} 不在响应中，请确认 node_id 格式正确（如 '15661:163'）"
             )
         return nodes[node_id]["document"]
 
@@ -210,6 +224,7 @@ class FigmaClient:
     ) -> bytes:
         """通过 node-id 导出图片"""
 
+        node_id = self._normalize_node_id(node_id)
         url = f"{self.base_url}/images/{self.file_key}"
 
         params = {
