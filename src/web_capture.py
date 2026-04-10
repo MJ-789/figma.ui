@@ -1,6 +1,33 @@
 """
-Playwright网站截图模块
-提供强大的网页截图和自动化功能
+src/web_capture.py  ── Playwright 网页截图模块
+================================================
+职责：
+    用 Playwright（同步 API）打开真实网站，执行截图操作，
+    为对比模块提供"实际页面截图"。
+
+核心类：
+    WebCapture（主类，推荐用 with 语句管理生命周期）
+        __enter__ / __exit__   ── 自动启动 / 关闭浏览器，配合 with 使用。
+        start()                ── 启动浏览器进程 + 创建上下文 + 新建页面。
+        capture_full_page()    ── 导航到 URL，等待网络空闲，截全页长图。
+        capture_element()      ── 截取页面上某个 CSS 选择器匹配的元素。
+        capture_viewport()     ── 只截当前可视区（不滚动）。
+        hide_elements()        ── 用 JS 把广告、时间戳等动态元素设为 display:none，
+                                  避免它们干扰像素对比。
+        wait_for_network_idle() ── 等待网络静止（主动调用版本）。
+        close()                ── 释放所有 Playwright 资源。
+
+    BatchCapture（批量工具，静态方法集合）
+        capture_multiple_pages()  ── 批量截取多个 URL。
+        capture_cross_browser()   ── 同一 URL 跑 chromium / firefox / webkit。
+        capture_responsive()      ── 同一 URL 模拟多种设备（手机/平板/桌面）。
+
+支持浏览器：
+    chromium（默认）/ firefox / webkit（仅 macOS）
+
+注意：
+    本模块使用 sync_playwright，与 pytest-playwright 插件的 asyncio 机制冲突。
+    pytest.ini 中已加 -p no:playwright 屏蔽该插件，请勿去掉该参数。
 """
 
 from playwright.sync_api import sync_playwright, Page, Browser, BrowserContext

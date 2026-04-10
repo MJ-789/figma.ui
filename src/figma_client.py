@@ -1,6 +1,31 @@
 """
-Figma API客户端
-优化版 (支持 node-id 导出 + 结构缓存)
+src/figma_client.py  ── Figma REST API 客户端
+================================================
+职责：
+    封装对 Figma 官方 REST API（v1）的所有调用，
+    供测试层直接拿到"设计稿截图"而不关心底层 HTTP 细节。
+
+核心能力：
+    1. 获取文件结构
+       get_file_structure()  ── 拉取整个 Figma 文件的 JSON 树，带内存缓存。
+       list_all_pages()      ── 列出文件内所有 Page 名称和 ID。
+       list_frames_in_page() ── 列出指定 Page 内所有 FRAME / COMPONENT。
+       list_all_pages_and_frames() ── 调试用：打印完整层级。
+
+    2. 查找节点
+       find_frame_by_name()  ── 用"页面名+Frame名"查 node_id。
+
+    3. 导出图片
+       export_node_image()   ── 用 node_id 调 /images 接口，返回 PNG 字节流。
+       save_node_to_file()   ── 字节流写成本地 PNG 文件（给对比模块用）。
+       save_frame_to_file()  ── 用名称找到 ID 再保存（更方便的上层封装）。
+
+依赖：
+    requests、config.Config（读取 token 和 file_key）
+
+注意：
+    node_id 格式为 "数字:数字"，如 "12539:1073"，
+    来自 Figma 编辑器右键菜单"Copy link to selection"或开发者面板。
 """
 
 import requests
@@ -152,6 +177,26 @@ class FigmaClient:
                 return frame["id"]
 
         return None
+
+    # =====================================================
+    # 节点JSON
+    # =====================================================
+
+    def get_node_json(self, node_id: str) -> Dict:
+        """
+        获取单个节点的完整 JSON 结构（含子节点、样式、颜色等）。
+
+        调用 /v1/files/{key}/nodes?ids={node_id}，
+        返回 nodes[node_id]["document"] 节点对象。
+        """
+        url = f"{self.base_url}/files/{self.file_key}/nodes"
+        data = self._get(url, params={"ids": node_id})
+        nodes = data.get("nodes", {})
+        if node_id not in nodes:
+            raise RuntimeError(
+                f"节点 {node_id} 不在响应中，请确认 node_id 格式正确（如 '12539:1073'）"
+            )
+        return nodes[node_id]["document"]
 
     # =====================================================
     # 导出图片

@@ -1,6 +1,42 @@
 """
-v1.1.0 页面发现模块
-支持种子页 + 受控点击发现站内页面
+src/page_crawler.py  ── 多页面自动发现模块（v1.1.0）
+================================================
+职责：
+    从一组"种子路径"出发，用 BFS 广度优先算法自动发现站内所有可访问页面，
+    供后续批量视觉对比使用。
+
+工作原理：
+    1. 把种子路径（如 ["/", "/about"]）加入队列。
+    2. 用 WebCapture 打开每个 URL，等待网络空闲。
+    3. 在页面 DOM 中找到所有可点击元素（a、button 等），提取 href。
+    4. 过滤：只保留同域名、未访问过、不含排除关键词的 URL。
+    5. 未超过最大深度时，把子页面加入队列继续遍历。
+    6. 返回发现的所有页面列表（包含 url、depth、from、status 字段）。
+
+核心类：
+    CrawlPage（dataclass）
+        url       ── 当前页面的完整 URL
+        depth     ── 距离种子的层数（种子本身 = 0）
+        from_url  ── 从哪个父页面发现的
+
+    PageCrawler（主类）
+        __init__()              ── 配置爬取参数（base_url、最大深度/页数/点击数、
+                                    点击选择器、排除关键词）。
+        _is_allowed_url()       ── URL 白名单检查（同域 + 非排除词 + http/https）。
+        _normalize_url()        ── 去掉 hash 和 query，统一去重标准。
+        _collect_urls_from_dom()── 在页面执行 JS，收集候选可点击元素的 href。
+        discover()              ── BFS 入口，返回发现页面列表。
+
+可通过 .env 控制的参数（对应 Config.CRAWL_*）：
+    CRAWL_MAX_DEPTH           ── 最大爬取深度，默认 2
+    CRAWL_MAX_PAGES           ── 最多发现页面数，默认 20
+    CRAWL_MAX_CLICKS_PER_PAGE ── 每页最多取几个候选 href，默认 8
+    CRAWL_CLICK_SELECTORS     ── 候选点击元素的 CSS 选择器列表
+    CRAWL_EXCLUDE_KEYWORDS    ── URL 含这些关键词时跳过（如 logout、delete）
+    CRAWL_SEED_PATHS          ── 起点路径列表，逗号分隔
+
+依赖：
+    collections.deque（BFS 队列）、urllib.parse、src.web_capture.WebCapture
 """
 
 from collections import deque

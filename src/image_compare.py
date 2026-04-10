@@ -1,6 +1,40 @@
 """
-图像对比模块
-提供图像相似度计算和差异可视化功能
+src/image_compare.py  ── 图像对比模块
+================================================
+职责：
+    接收两张图片（Figma 设计稿 vs 网站截图），计算相似度并生成可视化差异图，
+    是测试流程中"判定是否通过"的核心判断层。
+
+核心类 ImageCompare：
+    resize_to_match()        ── 把两张图缩放到相同尺寸（取较小值），
+                                保证像素数组可以直接做差运算。
+
+    calculate_similarity()   ── 用 OpenCV absdiff 计算逐像素差异，
+                                返回 0~100 的相似度分数（100 = 完全一样）。
+
+    calculate_mse()          ── 均方误差（MSE）：数值越小越相似，
+                                对亮度差异更敏感。
+
+    calculate_ssim()         ── 结构相似度（SSIM，需要 scikit-image）：
+                                综合亮度/对比度/结构三个维度，更贴近人眼感知。
+                                注意：requirements.txt 未包含 scikit-image，
+                                如需此方法请先 pip install scikit-image。
+
+    generate_diff_image()    ── 生成"差异高亮图"：用蓝色标记出不一致区域，
+                                保存到 reports/images/*_diff.png。
+
+    generate_side_by_side()  ── 生成左右并排对比图（左=Figma，右=网站），
+                                保存到 reports/images/*_compare.png。
+
+    is_similar()             ── 直接返回 bool，相似度 >= 阈值则为 True。
+
+    get_comparison_report()  ── 汇总报告字典，包含相似度、MSE、阈值、
+                                是否通过及两张图片的路径和尺寸信息。
+                                （注意：所有数值已转为原生 float/bool，
+                                  避免 numpy 类型导致 json.dump 报错）
+
+依赖：
+    Pillow（PIL）、OpenCV（cv2）、NumPy
 """
 
 from PIL import Image
