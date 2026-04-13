@@ -59,6 +59,44 @@ except ImportError:
 
 class ReportWriter:
 
+    @staticmethod
+    def _write_json(output_path: Path, payload: Dict[str, Any]) -> Path:
+        """统一写入 JSON，避免各类报告重复实现落盘逻辑。"""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return output_path
+
+    # ------------------------------------------------
+    # vNext  自动测试代理：站点发现报告
+    # ------------------------------------------------
+
+    @staticmethod
+    def write_site_inventory(
+        output_path: Path,
+        base_url: str,
+        summary: Dict[str, Any],
+        pages: List[Dict[str, Any]],
+        generated_at: str | None = None,
+    ) -> Path:
+        """
+        写入自动测试代理第一阶段的站点发现报告（site_inventory.json）。
+
+        Args:
+            output_path:   输出路径（通常为 reports/json/site_inventory.json）
+            base_url:      被发现的网站根地址
+            summary:       站点发现概要（页数、深度、种子路径等）
+            pages:         结构化页面清单
+            generated_at:  可选，外部已生成的时间戳；为空时自动补当前时间
+        """
+        payload = {
+            "base_url": base_url,
+            "generated_at": generated_at or datetime.now(UTC).isoformat(),
+            "summary": summary,
+            "pages": pages,
+        }
+        return ReportWriter._write_json(output_path, payload)
+
     # ------------------------------------------------
     # v1.2.0  属性级 diff 报告
     # ------------------------------------------------
@@ -101,11 +139,7 @@ class ReportWriter:
             "result": result,
         }
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-
-        return output_path
+        return ReportWriter._write_json(output_path, payload)
 
     # ------------------------------------------------
     # v1.1.0  像素对比 / 爬取结果报告（保留）
@@ -140,8 +174,4 @@ class ReportWriter:
             "page_results": page_results,
         }
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-
-        return output_path
+        return ReportWriter._write_json(output_path, payload)

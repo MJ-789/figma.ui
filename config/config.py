@@ -38,7 +38,11 @@ config/config.py  ── 全局配置中心
 
 import os
 from pathlib import Path
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - 兼容未安装 python-dotenv 的环境
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 load_dotenv()
 
@@ -48,6 +52,17 @@ class Config:
     REPORTS_DIR = BASE_DIR / "reports"
     # 截图统一存放在 reports/ 下，与差异图、JSON、HTML 集中在同一结果目录
     SCREENSHOTS_DIR = REPORTS_DIR / "screenshots"
+    KNOWLEDGE_DIR = BASE_DIR / "knowledge"
+
+    @staticmethod
+    def _get_bool(name: str, default: str = "false") -> bool:
+        """把 .env 中的布尔字符串统一解析为 bool。"""
+        return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _get_csv(name: str, default: str = "") -> list[str]:
+        """把逗号分隔配置解析为列表，自动去空白项。"""
+        return [p.strip() for p in os.getenv(name, default).split(",") if p.strip()]
 
     FIGMA_ACCESS_TOKEN = os.getenv('FIGMA_ACCESS_TOKEN')
     FIGMA_FILE_KEY = os.getenv('FIGMA_FILE_KEY')
@@ -72,29 +87,64 @@ class Config:
     COMPARE_MIN_MATCH_COUNT = int(os.getenv('COMPARE_MIN_MATCH_COUNT', '3'))
 
     DEFAULT_BROWSER = os.getenv('DEFAULT_BROWSER', 'chromium')
-    HEADLESS = os.getenv('HEADLESS', 'true').lower() == 'true'
+    HEADLESS = _get_bool.__func__('HEADLESS', 'true')
     JSON_REPORT_PATH = REPORTS_DIR / "json" / "run_result.json"
     ELEMENT_DIFF_PATH = REPORTS_DIR / "json" / "element_diff.json"
     HTML_REPORT_PATH = REPORTS_DIR / "report.html"
+    SITE_INVENTORY_PATH = REPORTS_DIR / "json" / "site_inventory.json"
+    FIGMA_INVENTORY_PATH = REPORTS_DIR / "json" / "figma_inventory.json"
+    PAGE_PAIRS_PATH = REPORTS_DIR / "json" / "page_pairs.json"
+    TEST_PLAN_PATH = REPORTS_DIR / "json" / "test_plan.json"
+    KNOWLEDGE_PAGE_PAIRS_PATH = KNOWLEDGE_DIR / "page_pairs.json"
 
     # v1.1.0: 多页面爬取配置
-    CRAWL_ENABLED = os.getenv('CRAWL_ENABLED', 'true').lower() == 'true'
+    CRAWL_ENABLED = _get_bool.__func__('CRAWL_ENABLED', 'true')
     CRAWL_MAX_DEPTH = int(os.getenv('CRAWL_MAX_DEPTH', '2'))
     CRAWL_MAX_PAGES = int(os.getenv('CRAWL_MAX_PAGES', '20'))
     CRAWL_MAX_CLICKS_PER_PAGE = int(os.getenv('CRAWL_MAX_CLICKS_PER_PAGE', '8'))
-    CRAWL_SEED_PATHS = [p.strip() for p in os.getenv('CRAWL_SEED_PATHS', '/').split(',') if p.strip()]
-    CRAWL_CLICK_SELECTORS = [
-        p.strip() for p in os.getenv(
-            'CRAWL_CLICK_SELECTORS',
-            "a[href],button,[role='link'],[role='button']"
-        ).split(',') if p.strip()
-    ]
+    CRAWL_SEED_PATHS = _get_csv.__func__('CRAWL_SEED_PATHS', '/')
+    CRAWL_CLICK_SELECTORS = _get_csv.__func__(
+        'CRAWL_CLICK_SELECTORS',
+        "a[href],button,[role='link'],[role='button']"
+    )
     CRAWL_EXCLUDE_KEYWORDS = [
-        p.strip().lower() for p in os.getenv(
+        p.lower() for p in _get_csv.__func__(
             'CRAWL_EXCLUDE_KEYWORDS',
             "logout,signout,delete,remove"
-        ).split(',') if p.strip()
+        )
     ]
+
+    # vNext: 自动测试代理配置
+    AGENT_MODE = _get_bool.__func__('AGENT_MODE', 'false')
+    DISCOVERY_ENABLED = _get_bool.__func__('DISCOVERY_ENABLED', 'true')
+    DISCOVERY_MAX_DEPTH = int(os.getenv('DISCOVERY_MAX_DEPTH', str(CRAWL_MAX_DEPTH)))
+    DISCOVERY_MAX_PAGES = int(os.getenv('DISCOVERY_MAX_PAGES', str(CRAWL_MAX_PAGES)))
+    DISCOVERY_SEED_PATHS = _get_csv.__func__('DISCOVERY_SEED_PATHS', '/')
+    DISCOVERY_EXCLUDE_KEYWORDS = [
+        p.lower() for p in _get_csv.__func__(
+            'DISCOVERY_EXCLUDE_KEYWORDS',
+            "logout,signout,delete,remove"
+        )
+    ]
+
+    PAGE_MATCH_ENABLED = _get_bool.__func__('PAGE_MATCH_ENABLED', 'true')
+    PAGE_MATCH_TOP_K = int(os.getenv('PAGE_MATCH_TOP_K', '3'))
+    PAGE_MATCH_MIN_CONFIDENCE = float(os.getenv('PAGE_MATCH_MIN_CONFIDENCE', '0.70'))
+
+    AGENT_VIEWPORT_WIDTH = int(os.getenv('AGENT_VIEWPORT_WIDTH', '1440'))
+    AGENT_VIEWPORT_HEIGHT = int(os.getenv('AGENT_VIEWPORT_HEIGHT', '900'))
+    AGENT_HIDE_SELECTORS = _get_csv.__func__(
+        'AGENT_HIDE_SELECTORS',
+        ".advertisement,.cookie-banner,[class*='timestamp'],[id*='chat']"
+    )
+
+    LLM_ENABLED = _get_bool.__func__('LLM_ENABLED', 'false')
+    LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'openai')
+    LLM_MODEL = os.getenv('LLM_MODEL', 'gpt-4.1-mini')
+    LLM_API_KEY = os.getenv('LLM_API_KEY', '')
+    LLM_BASE_URL = os.getenv('LLM_BASE_URL', '')
+    LLM_TIMEOUT = int(os.getenv('LLM_TIMEOUT', '60'))
+    LLM_MAX_CANDIDATES = int(os.getenv('LLM_MAX_CANDIDATES', '3'))
 
     # 全局视口默认值
     _DEFAULT_WIDTH  = int(os.getenv('HOMEPAGE_WIDTH',  '1920'))
@@ -166,9 +216,11 @@ class Config:
         for directory in [
             cls.SCREENSHOTS_DIR / "figma",
             cls.SCREENSHOTS_DIR / "web",
+            cls.SCREENSHOTS_DIR / "site",
             cls.REPORTS_DIR / "html",
             cls.REPORTS_DIR / "images",
             cls.REPORTS_DIR / "json",
+            cls.KNOWLEDGE_DIR,
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 
