@@ -1,0 +1,275 @@
+"""
+src/run_orchestrator.py  ── 自动测试代理：全流程编排器
+=====================================================
+职责：
+    把"发现 → 索引 → 配对 → 计划 → 执行 → 报告"六步串成一键流程。
+    每一步的中间结果都落盘为 JSON，方便排查和复用。
+
+使用：
+    python run_agent.py          # 完整流程
+    python run_agent.py --dry    # 只做发现+配对+计划，不执行截图对比
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List
+
+from config.config import Config
+
+try:
+    from datetime import UTC
+except ImportError:  # pragma: no cover
+    from datetime import timezone
+
+    UTC = timezone.utc
+
+
+class RunOrchestrator:
+    """自动测试代理全流程编排。"""
+
+    def __init__(self, dry_run: bool = False):
+        self.dry_run = dry_run
+        self.version = self._read_version()
+
+    @staticmethod
+    def _read_version() -> str:
+        version_file = Config.BASE_DIR / "VERSION"
+        if version_file.exists():
+            return version_file.read_text(encoding="utf-8").strip()
+        return "dev"
+
+    @staticmethod
+    def _slug(name: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower()
+        return slug or "page"
+
+    def run(self) -> Dict[str, Any]:
+        """执行完整流程，返回汇总结果。"""
+        Config.setup_directories()
+        results: Dict[str, Any] = {"steps": {}}
+
+        # ── Step 1: 发现网站页面 ─────────────────────────
+        print(f"\n{'=' * 60}")
+        print("[1/6] 发现网站页面...")
+        print(f"{'=' * 60}")
+
+        from src.site_discovery import SiteDiscovery
+
+        discovery = SiteDiscovery()
+        site_inv = discovery.discover(write_report=True)
+        site_pages = site_inv["pages"]
+        print(f"      发现 {len(site_pages)} 个页面")
+        results["steps"]["site_discovery"] = {
+            "status": "ok",
+            "page_count": len(site_pages),
+        }
+
+        # ── Step 2: 索引 Figma 设计稿 ───────────────────
+        print(f"\n{'=' * 60}")
+        print("[2/6] 索引 Figma 设计稿...")
+        print(f"{'=' * 60}")
+
+        from src.figma_page_indexer import FigmaPageIndexer
+
+        figma_inv = FigmaPageIndexer.index(write_report=True)
+        figma_pages = figma_inv["pages"]
+        print(f"      索引到 {len(figma_pages)} 个设计页面")
+        results["steps"]["figma_index"] = {
+            "status": "ok",
+            "page_count": len(figma_pages),
+        }
+
+        # ── Step 3: 自动页面配对 ─────────────────────────
+        print(f"\n{'=' * 60}")
+        print("[3/6] 自动页面配对...")
+        print(f"{'=' * 60}")
+
+        from src.page_matcher import PageMatcher
+
+        matcher = PageMatcher()
+        pairs_result = matcher.match_and_save(figma_pages, site_pages)
+        pairs = pairs_result["pairs"]
+        summary = pairs_result["summary"]
+        print(f"      配对成功 {summary['matched']} 对，"
+              f"未配对 Figma {summary['unmatched_figma']} 个，"
+              f"未配对网站 {summary['unmatched_site']} 个")
+        for p in pairs:
+            print(f"        {p['figma_name']!r} → {p['site_path']!r}  "
+                  f"(置信度 {p['confidence']:.2f})")
+        results["steps"]["page_match"] = {
+            "status": "ok",
+            "matched": summary["matched"],
+        }
+
+        # ── Step 4: 生成测试计划 ─────────────────────────
+        print(f"\n{'=' * 60}")
+        print("[4/6] 生成测试计划...")
+        print(f"{'=' * 60}")
+
+        from src.test_plan_builder import TestPlanBuilder
+
+        builder = TestPlanBuilder()
+        plan = builder.build_and_save(pairs_result)
+        items = plan["items"]
+        print(f"      生成 {len(items)} 条测试计划")
+        for item in items:
+            print(f"        [{item['priority'].upper()}] {item['figma_name']!r} "
+                  f"vs {item['site_path']!r}")
+        results["steps"]["test_plan"] = {
+            "status": "ok",
+            "item_count": len(items),
+        }
+
+        if self.dry_run:
+            print(f"\n{'=' * 60}")
+            print("[DRY RUN] 跳过截图对比和报告生成。")
+            print(f"{'=' * 60}")
+            results["steps"]["execute"] = {"status": "skipped_dry_run"}
+            results["steps"]["report"] = {"status": "skipped_dry_run"}
+            return results
+
+        # ── Step 5: 执行测试计划 ─────────────────────────
+        print(f"\n{'=' * 60}")
+        print("[5/6] 执行截图对比...")
+        print(f"{'=' * 60}")
+
+        from src.figma_client import FigmaClient
+        from src.web_capture import WebCapture
+        from src.image_compare import ImageCompare
+
+        figma_client = FigmaClient()
+        comparator = ImageCompare(threshold=Config.SIMILARITY_THRESHOLD)
+        page_results: List[Dict[str, Any]] = []
+
+        with WebCapture(
+            browser_type=Config.DEFAULT_BROWSER,
+            headless=Config.HEADLESS,
+            viewport={
+                "width": Config.AGENT_VIEWPORT_WIDTH,
+                "height": Config.AGENT_VIEWPORT_HEIGHT,
+            },
+        ) as capture:
+            for item in items:
+                name_slug = self._slug(item["figma_name"])
+                figma_path = Config.SCREENSHOTS_DIR / "figma" / f"agent_{name_slug}.png"
+                web_path = Config.SCREENSHOTS_DIR / "web" / f"agent_{name_slug}.png"
+                diff_path = Config.REPORTS_DIR / "images" / f"agent_{name_slug}_diff.png"
+                compare_path = Config.REPORTS_DIR / "images" / f"agent_{name_slug}_compare.png"
+
+                print(f"\n      [{item['plan_id']}] {item['figma_name']!r} vs {item['site_url']!r}")
+
+                # 5a: 获取 Figma 设计稿截图
+                try:
+                    figma_client.save_node_to_file(
+                        node_id=item["figma_node_id"],
+                        output_path=figma_path,
+                        scale=2,
+                    )
+                    print(f"        Figma 截图: {figma_path.name}")
+                except Exception as exc:
+                    print(f"        [ERROR] Figma 导出失败: {exc}")
+                    page_results.append(self._error_result(item, f"figma_export:{type(exc).__name__}"))
+                    continue
+
+                # 5b: 获取网站截图
+                try:
+                    vp = item.get("viewport", {})
+                    if vp:
+                        capture.page.set_viewport_size(vp)
+                    capture.page.goto(item["site_url"], wait_until="networkidle", timeout=30000)
+                    hide = item.get("hide_selectors", [])
+                    if hide:
+                        capture.hide_elements(hide)
+                    capture.page.screenshot(path=str(web_path), full_page=True)
+                    print(f"        网站截图: {web_path.name}")
+                except Exception as exc:
+                    print(f"        [ERROR] 网站截图失败: {exc}")
+                    page_results.append(self._error_result(item, f"web_capture:{type(exc).__name__}"))
+                    continue
+
+                # 5c: 对比
+                try:
+                    similarity = comparator.calculate_similarity(figma_path, web_path)
+                    comparator.generate_diff_image(figma_path, web_path, diff_path)
+                    comparator.generate_side_by_side(
+                        figma_path, web_path, compare_path,
+                        labels=("Figma", "Website"),
+                    )
+                    passed = similarity >= Config.SIMILARITY_THRESHOLD
+                    status_label = "PASS" if passed else "FAIL"
+                    print(f"        相似度: {similarity:.1f}%  阈值: {Config.SIMILARITY_THRESHOLD}%  → {status_label}")
+
+                    page_results.append({
+                        "plan_id": item["plan_id"],
+                        "figma_name": item["figma_name"],
+                        "site_url": item["site_url"],
+                        "site_path": item["site_path"],
+                        "similarity": float(similarity),
+                        "threshold": float(Config.SIMILARITY_THRESHOLD),
+                        "passed": passed,
+                        "figma_image": str(figma_path),
+                        "web_image": str(web_path),
+                        "diff_image": str(diff_path),
+                        "compare_image": str(compare_path),
+                        "status": "ok",
+                    })
+                except Exception as exc:
+                    print(f"        [ERROR] 对比失败: {exc}")
+                    page_results.append(self._error_result(item, f"compare:{type(exc).__name__}"))
+
+        results["steps"]["execute"] = {
+            "status": "ok",
+            "total": len(page_results),
+            "passed": sum(1 for r in page_results if r.get("passed")),
+            "failed": sum(1 for r in page_results if r.get("status") == "ok" and not r.get("passed")),
+            "errors": sum(1 for r in page_results if r.get("status", "").startswith("error")),
+        }
+
+        # ── Step 6: 写总报告 ─────────────────────────────
+        print(f"\n{'=' * 60}")
+        print("[6/6] 生成总报告...")
+        print(f"{'=' * 60}")
+
+        from src.report_writer import ReportWriter
+
+        ReportWriter.write_run_result(
+            output_path=Config.JSON_REPORT_PATH,
+            version=self.version,
+            base_url=Config.BASE_URL,
+            crawl_summary={
+                "mode": "agent_v1",
+                "matched_pairs": len(pairs),
+                "executed": len(page_results),
+            },
+            page_results=page_results,
+        )
+        print(f"      JSON 报告: {Config.JSON_REPORT_PATH}")
+
+        total_ok = sum(1 for r in page_results if r.get("status") == "ok")
+        total_pass = sum(1 for r in page_results if r.get("passed"))
+        total_fail = total_ok - total_pass
+        total_err = len(page_results) - total_ok
+
+        print(f"\n{'=' * 60}")
+        print(f"  完成！共 {len(page_results)} 条  |  "
+              f"PASS {total_pass}  |  FAIL {total_fail}  |  ERROR {total_err}")
+        print(f"{'=' * 60}")
+
+        results["steps"]["report"] = {"status": "ok"}
+        return results
+
+    @staticmethod
+    def _error_result(item: Dict[str, Any], error: str) -> Dict[str, Any]:
+        return {
+            "plan_id": item.get("plan_id", ""),
+            "figma_name": item.get("figma_name", ""),
+            "site_url": item.get("site_url", ""),
+            "site_path": item.get("site_path", ""),
+            "similarity": 0.0,
+            "threshold": float(Config.SIMILARITY_THRESHOLD),
+            "passed": False,
+            "status": f"error:{error}",
+        }

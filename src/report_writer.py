@@ -98,6 +98,48 @@ class ReportWriter:
         return ReportWriter._write_json(output_path, payload)
 
     # ------------------------------------------------
+    # vNext  自动测试代理：页面配对报告
+    # ------------------------------------------------
+
+    @staticmethod
+    def write_page_pairs(
+        output_path: Path,
+        payload: Dict[str, Any],
+    ) -> Path:
+        """写入页面配对结果（page_pairs.json）。"""
+        return ReportWriter._write_json(output_path, payload)
+
+    # ------------------------------------------------
+    # vNext  自动测试代理：Figma 设计稿索引报告
+    # ------------------------------------------------
+
+    @staticmethod
+    def write_figma_inventory(
+        output_path: Path,
+        figma_file_key: str,
+        summary: Dict[str, Any],
+        pages: List[Dict[str, Any]],
+        generated_at: str | None = None,
+    ) -> Path:
+        """
+        写入 Figma 设计稿页面索引报告（figma_inventory.json）。
+
+        Args:
+            output_path:     输出路径（通常为 reports/json/figma_inventory.json）
+            figma_file_key:  Figma 文件唯一标识
+            summary:         索引概要（页面数等）
+            pages:           结构化 Frame 清单
+            generated_at:    可选时间戳
+        """
+        payload = {
+            "figma_file_key": figma_file_key,
+            "generated_at": generated_at or datetime.now(UTC).isoformat(),
+            "summary": summary,
+            "pages": pages,
+        }
+        return ReportWriter._write_json(output_path, payload)
+
+    # ------------------------------------------------
     # v1.2.0  属性级 diff 报告
     # ------------------------------------------------
 
