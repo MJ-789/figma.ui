@@ -29,6 +29,8 @@ src/figma_client.py  ── Figma REST API 客户端
 """
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from typing import Dict, List, Optional
 from pathlib import Path
 from config.config import Config
@@ -50,11 +52,19 @@ class FigmaClient:
 
         self.base_url = "https://api.figma.com/v1"
 
-        # 使用 Session 提升性能
+        # 使用 Session 提升性能，并配置超时和重试
         self.session = requests.Session()
         self.session.headers.update({
             "X-Figma-Token": self.access_token
         })
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=2,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
         # 文件结构缓存
         self._file_cache = None
@@ -77,9 +87,9 @@ class FigmaClient:
     # =====================================================
 
     def _get(self, url: str, params: dict = None) -> Dict:
-        """统一 GET 请求"""
+        """统一 GET 请求（120s 超时，自动重试）"""
 
-        response = self.session.get(url, params=params)
+        response = self.session.get(url, params=params, timeout=120)
 
         try:
             response.raise_for_status()

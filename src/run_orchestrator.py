@@ -12,6 +12,7 @@ src/run_orchestrator.py  ── 自动测试代理：全流程编排器
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -30,8 +31,9 @@ except ImportError:  # pragma: no cover
 class RunOrchestrator:
     """自动测试代理全流程编排。"""
 
-    def __init__(self, dry_run: bool = False):
+    def __init__(self, dry_run: bool = False, reuse_inventory: bool = True):
         self.dry_run = dry_run
+        self.reuse_inventory = reuse_inventory
         self.version = self._read_version()
 
     @staticmethod
@@ -46,6 +48,24 @@ class RunOrchestrator:
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower()
         return slug or "page"
 
+    def _load_or_run_site_discovery(self) -> Dict[str, Any]:
+        cache = Config.SITE_INVENTORY_PATH
+        if self.reuse_inventory and cache.exists():
+            print("      (复用已有 site_inventory.json)")
+            with open(cache, "r", encoding="utf-8") as f:
+                return json.load(f)
+        from src.site_discovery import SiteDiscovery
+        return SiteDiscovery().discover(write_report=True)
+
+    def _load_or_run_figma_index(self) -> Dict[str, Any]:
+        cache = Config.FIGMA_INVENTORY_PATH
+        if self.reuse_inventory and cache.exists():
+            print("      (复用已有 figma_inventory.json)")
+            with open(cache, "r", encoding="utf-8") as f:
+                return json.load(f)
+        from src.figma_page_indexer import FigmaPageIndexer
+        return FigmaPageIndexer.index(write_report=True)
+
     def run(self) -> Dict[str, Any]:
         """执行完整流程，返回汇总结果。"""
         Config.setup_directories()
@@ -56,10 +76,7 @@ class RunOrchestrator:
         print("[1/6] 发现网站页面...")
         print(f"{'=' * 60}")
 
-        from src.site_discovery import SiteDiscovery
-
-        discovery = SiteDiscovery()
-        site_inv = discovery.discover(write_report=True)
+        site_inv = self._load_or_run_site_discovery()
         site_pages = site_inv["pages"]
         print(f"      发现 {len(site_pages)} 个页面")
         results["steps"]["site_discovery"] = {
@@ -72,9 +89,7 @@ class RunOrchestrator:
         print("[2/6] 索引 Figma 设计稿...")
         print(f"{'=' * 60}")
 
-        from src.figma_page_indexer import FigmaPageIndexer
-
-        figma_inv = FigmaPageIndexer.index(write_report=True)
+        figma_inv = self._load_or_run_figma_index()
         figma_pages = figma_inv["pages"]
         print(f"      索引到 {len(figma_pages)} 个设计页面")
         results["steps"]["figma_index"] = {
