@@ -146,69 +146,45 @@ class Config:
     LLM_TIMEOUT = int(os.getenv('LLM_TIMEOUT', '60'))
     LLM_MAX_CANDIDATES = int(os.getenv('LLM_MAX_CANDIDATES', '3'))
 
-    # 全局视口默认值
-    _DEFAULT_WIDTH  = int(os.getenv('HOMEPAGE_WIDTH',  '1920'))
-    _DEFAULT_HEIGHT = int(os.getenv('HOMEPAGE_HEIGHT', '900'))
-
     @classmethod
     def _parse_page_map(cls) -> dict:
         """
         解析 .env 中的 PAGE_MAP，构建 TEST_PAGES 字典。
-
-        PAGE_MAP 格式（多条用英文逗号分隔）：
-            标签|figma_node|网站路径
-        示例：
-            PAGE_MAP=Home|15661-163|/ , category|15661-164|/list/Finance
-
-        若 PAGE_MAP 未设置，退回到旧版单页配置（HOMEPAGE_FIGMA_NODE 等）。
+        PAGE_MAP 格式：标签|figma_node|网站路径（逗号分隔多条）
+        仅供旧版 pytest 测试流程（test_desktop.py）使用。
+        新版自动代理（run_agent.py）不依赖此配置。
         """
         raw = os.getenv('PAGE_MAP', '').strip()
-        if raw:
-            pages = {}
-            for entry in raw.split(','):
-                parts = [p.strip() for p in entry.strip().split('|')]
-                if len(parts) != 3:
-                    continue
-                label, node_id, url_path = parts
-                if not label or not node_id:
-                    continue
-                # 把标签转为安全 key（小写 + 下划线）
-                key = label.lower().replace(' ', '_').replace('/', '_')
-                pages[key] = {
-                    'figma_node': node_id,
-                    'url':        url_path,
-                    'wait_for':   '',          # 不等待特定元素（避免误判）
-                    'viewport': {
-                        'width':  cls._DEFAULT_WIDTH,
-                        'height': cls._DEFAULT_HEIGHT,
-                    },
-                    'element_map': {},
-                    '_label': label,           # 原始标签，供报告使用
-                }
-            if pages:
-                return pages
-
-        # 兼容旧版单页配置
-        return {
-            'homepage': {
-                'figma_node': os.getenv('HOMEPAGE_FIGMA_NODE', '15661-163'),
-                'url':        os.getenv('HOMEPAGE_URL', '/'),
-                'wait_for':   os.getenv('HOMEPAGE_WAIT_FOR', ''),
-                'viewport': {
-                    'width':  cls._DEFAULT_WIDTH,
-                    'height': cls._DEFAULT_HEIGHT,
-                },
-                'element_map': {},
-                '_label': 'homepage',
-            }
+        if not raw:
+            return {}
+        vp = {
+            "width": cls.AGENT_VIEWPORT_WIDTH,
+            "height": cls.AGENT_VIEWPORT_HEIGHT,
         }
+        pages = {}
+        for entry in raw.split(','):
+            parts = [p.strip() for p in entry.strip().split('|')]
+            if len(parts) != 3:
+                continue
+            label, node_id, url_path = parts
+            if not label or not node_id:
+                continue
+            key = label.lower().replace(' ', '_').replace('/', '_')
+            pages[key] = {
+                'figma_node': node_id,
+                'url':        url_path,
+                'wait_for':   '',
+                'viewport':   vp,
+                'element_map': {},
+                '_label': label,
+            }
+        return pages
 
-    # TEST_PAGES 由 PAGE_MAP 动态生成
-    TEST_PAGES: dict = {}   # 占位，实际值在类定义后填充
+    TEST_PAGES: dict = {}
 
     @classmethod
     def build_test_pages(cls):
-        """（重新）从环境变量构建 TEST_PAGES，load_dotenv 后调用一次即可。"""
+        """从 PAGE_MAP 环境变量构建 TEST_PAGES。"""
         cls.TEST_PAGES = cls._parse_page_map()
 
     @classmethod

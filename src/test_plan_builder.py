@@ -9,7 +9,6 @@ src/test_plan_builder.py  ── 测试计划生成器
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List

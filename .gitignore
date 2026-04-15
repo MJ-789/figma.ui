@@ -5,13 +5,12 @@ __pycache__/
 venv/
 env/
 
-# 环境变量
+# 环境变量（含密钥，禁止提交）
 .env
 
-# 测试输出
-screenshots/
+# 运行产出（每次自动覆盖）
 reports/
-recordings/
+knowledge/
 
 # IDE
 .idea/

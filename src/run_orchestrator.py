@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -66,8 +65,32 @@ class RunOrchestrator:
         from src.figma_page_indexer import FigmaPageIndexer
         return FigmaPageIndexer.index(write_report=True)
 
+    def _clean_previous_reports(self):
+        """清理上次运行产出的报告和截图，确保结果不残留。"""
+        import shutil
+
+        always_clean = [
+            Config.REPORTS_DIR / "images",
+            Config.SCREENSHOTS_DIR / "figma",
+            Config.SCREENSHOTS_DIR / "web",
+            Config.SCREENSHOTS_DIR / "site",
+        ]
+        for d in always_clean:
+            if d.exists():
+                shutil.rmtree(d)
+
+        json_dir = Config.REPORTS_DIR / "json"
+        if json_dir.exists():
+            inventory_names = {"site_inventory.json", "figma_inventory.json"}
+            for f in json_dir.iterdir():
+                if f.is_file():
+                    if self.reuse_inventory and f.name in inventory_names:
+                        continue
+                    f.unlink()
+
     def run(self) -> Dict[str, Any]:
         """执行完整流程，返回汇总结果。"""
+        self._clean_previous_reports()
         Config.setup_directories()
         results: Dict[str, Any] = {"steps": {}}
 
