@@ -237,14 +237,21 @@ def _pixel_section(run_result: Optional[Dict]) -> str:
         sim = r.get("similarity", 0)
         thr = r.get("threshold", 95)
         ok  = r.get("passed", False)
-        name = r.get("page_name", "unknown")
+        name = r.get("page_name") or r.get("figma_name") or r.get("site_path", "unknown")
         browser = r.get("browser", "")
         mse = r.get("mse", "—")
+        site_url = r.get("site_url", "")
         col = _score_color(sim, thr)
         bar = min(int(sim), 100)
 
-        def _img(key: str, label: str) -> str:
-            src = _b64(r.get(key, ""))
+        def _img(keys, label: str) -> str:
+            if isinstance(keys, str):
+                keys = [keys]
+            src = ""
+            for key in keys:
+                src = _b64(r.get(key, ""))
+                if src:
+                    break
             if src:
                 return f'<div class="img-col"><div class="img-lbl">{label}</div><img src="{src}" alt="{label}"></div>'
             return f'<div class="img-col"><div class="img-lbl">{label}</div><div class="no-img">暂无图片</div></div>'
@@ -263,10 +270,13 @@ def _pixel_section(run_result: Optional[Dict]) -> str:
     <span class="s-sub">MSE {mse}</span>
     <span class="s-sub">浏览器 {browser}</span>
   </div>
+  <div class="meta-row">
+    <span>页面链接 <code>{site_url or "—"}</code></span>
+  </div>
   <div class="img-grid">
-    {_img("figma_path",    "Figma 设计稿")}
-    {_img("web_path",      f"网站截图 ({browser})")}
-    {_img("diff_path",     "差异高亮（蓝=差异区域）")}
+    {_img(["figma_path", "figma_image"],    "Figma 设计稿")}
+    {_img(["web_path", "web_image"],        f"网站截图 ({browser or 'web'})")}
+    {_img(["diff_path", "diff_image"],      "差异高亮（蓝=差异区域）")}
   </div>
 </div>""")
 
@@ -511,7 +521,7 @@ def generate_report(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
-    print(f"✅ 可视化报告已生成: {output_path}")
+    print(f"[OK] 可视化报告已生成: {output_path}")
     return output_path
 
 

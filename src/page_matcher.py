@@ -58,6 +58,12 @@ class PageMatcher:
             if min_confidence is not None
             else Config.PAGE_MATCH_MIN_CONFIDENCE
         )
+        self.weights = {
+            "name": Config.PAGE_MATCH_WEIGHT_NAME,
+            "text": Config.PAGE_MATCH_WEIGHT_TEXT,
+            "structure": Config.PAGE_MATCH_WEIGHT_STRUCTURE,
+            "page_type": Config.PAGE_MATCH_WEIGHT_PAGE_TYPE,
+        }
 
     def match(
         self,
@@ -85,6 +91,7 @@ class PageMatcher:
             "config": {
                 "top_k": self.top_k,
                 "min_confidence": self.min_confidence,
+                "weights": self.weights,
             },
             "pairs": [asdict(p) for p in pairs],
             "unmatched_figma_pages": unmatched_figma,
@@ -122,7 +129,7 @@ class PageMatcher:
         for fp in figma_pages:
             scored = []
             for sp in site_pages:
-                sim = compute_page_similarity(fp, sp)
+                sim = compute_page_similarity(fp, sp, weights=self.weights)
                 scored.append({
                     "figma": fp,
                     "site": sp,
@@ -173,10 +180,12 @@ class PageMatcher:
             reason_parts = []
             if scores["name_score"] >= 0.6:
                 reason_parts.append("名称相似")
-            if scores["text_score"] >= 0.4:
-                reason_parts.append("文本重叠")
+            if scores.get("page_type_score", 0) >= 0.8:
+                reason_parts.append("页面类型一致")
             if scores["structure_score"] >= 0.5:
                 reason_parts.append("结构接近")
+            if scores["text_score"] >= 0.55:
+                reason_parts.append("文本辅助命中")
             reason = "，".join(reason_parts) if reason_parts else "综合得分达标"
 
             pairs.append(PagePair(

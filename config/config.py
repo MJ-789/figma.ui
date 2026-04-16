@@ -66,6 +66,8 @@ class Config:
 
     FIGMA_ACCESS_TOKEN = os.getenv('FIGMA_ACCESS_TOKEN')
     FIGMA_FILE_KEY = os.getenv('FIGMA_FILE_KEY')
+    FIGMA_TARGET_NODE_ID = os.getenv('FIGMA_TARGET_NODE_ID', '').replace("-", ":").strip()
+    FIGMA_INDEX_MIN_WIDTH = float(os.getenv('FIGMA_INDEX_MIN_WIDTH', '0'))
     BASE_URL = os.getenv('BASE_URL', 'https://example.com')
     SIMILARITY_THRESHOLD = float(os.getenv('SIMILARITY_THRESHOLD', '95'))
 
@@ -130,6 +132,10 @@ class Config:
     PAGE_MATCH_ENABLED = _get_bool.__func__('PAGE_MATCH_ENABLED', 'true')
     PAGE_MATCH_TOP_K = int(os.getenv('PAGE_MATCH_TOP_K', '3'))
     PAGE_MATCH_MIN_CONFIDENCE = float(os.getenv('PAGE_MATCH_MIN_CONFIDENCE', '0.70'))
+    PAGE_MATCH_WEIGHT_NAME = float(os.getenv('PAGE_MATCH_WEIGHT_NAME', '0.35'))
+    PAGE_MATCH_WEIGHT_TEXT = float(os.getenv('PAGE_MATCH_WEIGHT_TEXT', '0.10'))
+    PAGE_MATCH_WEIGHT_STRUCTURE = float(os.getenv('PAGE_MATCH_WEIGHT_STRUCTURE', '0.30'))
+    PAGE_MATCH_WEIGHT_PAGE_TYPE = float(os.getenv('PAGE_MATCH_WEIGHT_PAGE_TYPE', '0.25'))
 
     AGENT_VIEWPORT_WIDTH = int(os.getenv('AGENT_VIEWPORT_WIDTH', '1440'))
     AGENT_VIEWPORT_HEIGHT = int(os.getenv('AGENT_VIEWPORT_HEIGHT', '900'))

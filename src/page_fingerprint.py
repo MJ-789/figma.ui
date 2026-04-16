@@ -18,6 +18,15 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List
 
 
+_PAGE_TYPE_ALIASES = {
+    "home": {"home", "homepage", "landing", "index", "首", "首页"},
+    "category": {"category", "categories", "list", "listing", "栏目", "分类"},
+    "detail": {"detail", "details", "article", "post", "story", "详情", "文章"},
+    "search": {"search", "result", "results", "搜索"},
+    "author": {"author", "profile", "user", "person", "作者", "个人"},
+}
+
+
 def text_similarity(a: str, b: str) -> float:
     """两段文本的归一化相似度（0~1），不区分大小写。"""
     if not a or not b:
@@ -56,6 +65,52 @@ def _normalize_name(name: str) -> str:
     """把 Frame / 页面名中的各种分隔符统一成空格小写，便于比较。"""
     name = re.sub(r"[/_\-]+", " ", name)
     return re.sub(r"\s+", " ", name).strip().lower()
+
+
+def _page_type_from_figma_name(figma_name: str) -> str:
+    normalized = _normalize_name(figma_name)
+    if not normalized:
+        return "unknown"
+    for page_type, aliases in _PAGE_TYPE_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            return page_type
+    return "unknown"
+
+
+def _page_type_from_site(site_path: str, site_title: str) -> str:
+    normalized = _normalize_name(f"{site_path} {site_title}")
+    path_parts = [p for p in site_path.strip("/").split("/") if p]
+    if site_path == "/":
+        return "home"
+    if "/list/" in site_path or site_path.rstrip("/") == "/list":
+        return "category"
+    if "/search" in site_path:
+        return "search"
+    if any(token in normalized for token in _PAGE_TYPE_ALIASES["author"]):
+        return "author"
+    # 形如 /es/some-long-slug 的深层文章页通常是 detail 模板
+    if len(path_parts) >= 2 and path_parts[-2].lower() not in {"list", "search", "author", "profile", "user"}:
+        return "detail"
+    if any(part in normalized for part in _PAGE_TYPE_ALIASES["detail"]):
+        return "detail"
+    for page_type, aliases in _PAGE_TYPE_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            return page_type
+    return "unknown"
+
+
+def page_type_similarity(figma_name: str, site_title: str, site_path: str) -> float:
+    """按页面类型打分，更贴近视觉结构，而不是具体文案。"""
+    figma_type = _page_type_from_figma_name(figma_name)
+    site_type = _page_type_from_site(site_path, site_title)
+    if figma_type == "unknown" or site_type == "unknown":
+        return 0.0
+    if figma_type == site_type:
+        return 1.0
+    # category/listing 视觉结构通常接近
+    if {figma_type, site_type} <= {"category", "search"}:
+        return 0.45
+    return 0.0
 
 
 def name_similarity(figma_name: str, site_title: str, site_path: str) -> float:
@@ -144,8 +199,9 @@ def compute_page_similarity(
     """
     w = weights or {
         "name": 0.35,
-        "text": 0.40,
-        "structure": 0.25,
+        "text": 0.10,
+        "structure": 0.30,
+        "page_type": 0.25,
     }
 
     n_score = name_similarity(
@@ -164,16 +220,23 @@ def compute_page_similarity(
         figma_page.get("structure_summary", {}),
         site_page.get("dom_summary", {}),
     )
+    p_score = page_type_similarity(
+        figma_page.get("frame_name", ""),
+        site_page.get("title", ""),
+        site_page.get("path", ""),
+    )
 
     total = (
         w["name"] * n_score
         + w["text"] * t_score
         + w["structure"] * s_score
+        + w["page_type"] * p_score
     )
 
     return {
         "name_score": round(n_score, 4),
         "text_score": round(t_score, 4),
         "structure_score": round(s_score, 4),
+        "page_type_score": round(p_score, 4),
         "total_score": round(total, 4),
     }

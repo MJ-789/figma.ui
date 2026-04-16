@@ -143,6 +143,23 @@ class TestFigmaPageIndexer:
         assert "#FFFFFF" in colors
         assert any(c.startswith("#4F") or c.startswith("#4E") for c in colors)
 
+    def test_index_from_target_page_node(self):
+        entries = FigmaPageIndexer.index_from_file_data(
+            SAMPLE_FILE_DATA,
+            target_node_id="0:1",
+        )
+        names = [e.frame_name for e in entries]
+        assert names == ["Homepage", "Pricing"]
+
+    def test_index_from_target_frame_node(self):
+        entries = FigmaPageIndexer.index_from_file_data(
+            SAMPLE_FILE_DATA,
+            target_node_id="12539:1073",
+        )
+        assert len(entries) == 1
+        assert entries[0].frame_name == "Homepage"
+        assert entries[0].page_name == "Homepage"
+
 
 class TestFigmaReportWriter:
     def test_write_figma_inventory(self, tmp_path: Path):

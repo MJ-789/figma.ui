@@ -5,6 +5,7 @@ from src.page_fingerprint import (
     list_overlap,
     best_pairwise_similarity,
     name_similarity,
+    page_type_similarity,
     compute_page_similarity,
 )
 from src.page_matcher import PageMatcher
@@ -86,6 +87,17 @@ class TestNameSimilarity:
         assert score < 0.5
 
 
+class TestPageTypeSimilarity:
+    def test_home_matches_root(self):
+        assert page_type_similarity("Home", "Example", "/") == 1.0
+
+    def test_category_matches_list_path(self):
+        assert page_type_similarity("Category", "Finance", "/list/Finance") == 1.0
+
+    def test_unrelated_types(self):
+        assert page_type_similarity("Detail", "Example", "/list/Finance") == 0.0
+
+
 class TestComputePageSimilarity:
     def test_correct_pair_scores_higher(self):
         correct = compute_page_similarity(FIGMA_PAGES[0], SITE_PAGES[0])
@@ -96,6 +108,10 @@ class TestComputePageSimilarity:
         correct = compute_page_similarity(FIGMA_PAGES[1], SITE_PAGES[1])
         wrong = compute_page_similarity(FIGMA_PAGES[1], SITE_PAGES[0])
         assert correct["total_score"] > wrong["total_score"]
+
+    def test_returns_page_type_score(self):
+        correct = compute_page_similarity(FIGMA_PAGES[1], SITE_PAGES[1])
+        assert "page_type_score" in correct
 
 
 class TestPageMatcher:

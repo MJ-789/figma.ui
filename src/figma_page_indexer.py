@@ -55,7 +55,25 @@ class FigmaPageIndexer:
     )
 
     @classmethod
-    def index_from_file_data(cls, file_data: dict) -> List[FigmaPageEntry]:
+    def _normalize_node_id(cls, node_id: str) -> str:
+        return (node_id or "").replace("-", ":").strip()
+
+    @classmethod
+    def _find_node_by_id(cls, node: dict, target_node_id: str) -> Optional[dict]:
+        if cls._normalize_node_id(node.get("id", "")) == target_node_id:
+            return node
+        for child in node.get("children", []):
+            found = cls._find_node_by_id(child, target_node_id)
+            if found:
+                return found
+        return None
+
+    @classmethod
+    def index_from_file_data(
+        cls,
+        file_data: dict,
+        target_node_id: str | None = None,
+    ) -> List[FigmaPageEntry]:
         """
         纯数据方法：从 get_file_structure() 的返回值中提取页面清单。
 
@@ -66,9 +84,16 @@ class FigmaPageIndexer:
         Returns:
             FigmaPageEntry 列表，每条对应一个顶层 FRAME / COMPONENT
         """
-        entries: List[FigmaPageEntry] = []
         document = file_data.get("document", {})
+        normalized_target = cls._normalize_node_id(target_node_id or "")
 
+        if normalized_target:
+            target_node = cls._find_node_by_id(document, normalized_target)
+            if not target_node:
+                return []
+            return cls._index_from_target_node(target_node)
+
+        entries: List[FigmaPageEntry] = []
         for page_node in document.get("children", []):
             page_name = page_node.get("name", "")
             for child in page_node.get("children", []):
@@ -79,6 +104,26 @@ class FigmaPageIndexer:
                 if entry is not None:
                     entries.append(entry)
 
+        return entries
+
+    @classmethod
+    def _index_from_target_node(cls, target_node: dict) -> List[FigmaPageEntry]:
+        """仅索引指定目标节点下的页面，避免扫描整份 Figma 文件。"""
+        node_type = target_node.get("type", "")
+        node_name = target_node.get("name", "")
+
+        if node_type in ("FRAME", "COMPONENT", "COMPONENT_SET"):
+            entry = cls._build_entry(node_name, target_node)
+            return [entry] if entry is not None else []
+
+        entries: List[FigmaPageEntry] = []
+        for child in target_node.get("children", []):
+            child_type = child.get("type", "")
+            if child_type not in ("FRAME", "COMPONENT", "COMPONENT_SET"):
+                continue
+            entry = cls._build_entry(node_name, child)
+            if entry is not None:
+                entries.append(entry)
         return entries
 
     @classmethod
@@ -94,6 +139,8 @@ class FigmaPageIndexer:
 
         # 跳过极小 Frame（图标 / 装饰碎片）
         if width < 100 or height < 100:
+            return None
+        if Config.FIGMA_INDEX_MIN_WIDTH and width < Config.FIGMA_INDEX_MIN_WIDTH:
             return None
 
         texts = cls._collect_texts(frame_node, max_items=10)
@@ -267,7 +314,11 @@ class FigmaPageIndexer:
     # ------------------------------------------------------------------
 
     @classmethod
-    def index(cls, write_report: bool = True) -> Dict[str, Any]:
+    def index(
+        cls,
+        write_report: bool = True,
+        target_node_id: str | None = None,
+    ) -> Dict[str, Any]:
         """
         从 Figma API 拉取文件结构并索引，输出 figma_inventory.json。
 
@@ -279,7 +330,8 @@ class FigmaPageIndexer:
         Config.setup_directories()
         client = FigmaClient()
         file_data = client.get_file_structure()
-        entries = cls.index_from_file_data(file_data)
+        scope_node_id = cls._normalize_node_id(target_node_id or Config.FIGMA_TARGET_NODE_ID)
+        entries = cls.index_from_file_data(file_data, target_node_id=scope_node_id or None)
 
         generated_at = datetime.now(UTC).isoformat()
         payload = {
@@ -288,6 +340,7 @@ class FigmaPageIndexer:
             "pages": [asdict(e) for e in entries],
             "summary": {
                 "total_pages": len(entries),
+                "scope_node_id": scope_node_id,
             },
         }
 

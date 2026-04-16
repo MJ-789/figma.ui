@@ -83,9 +83,7 @@ class RunOrchestrator:
         if json_dir.exists():
             inventory_names = {"site_inventory.json", "figma_inventory.json"}
             for f in json_dir.iterdir():
-                if f.is_file():
-                    if self.reuse_inventory and f.name in inventory_names:
-                        continue
+                if f.is_file() and f.name not in inventory_names:
                     f.unlink()
 
     def run(self) -> Dict[str, Any]:
