@@ -1,157 +1,98 @@
-# Figma UI 自动化视觉回归测试
+# Figma UI Automation
 
-把 Figma 设计稿与真实网站做像素级对比，自动判断视觉一致性。
+把 Figma 设计稿与真实网站做自动化视觉对比，输出可视化报告和元素级差异清单，帮助开发快速定位并修复 UI 偏差。
 
----
+## 当前能力
+
+- 自动发现网站页面并生成站点清单
+- 自动索引 Figma 页面/模板并进行页面配对
+- 页面级截图对比（相似度、差异图、并排图）
+- 元素级样式对比（颜色/字号/字重/字体/行高/圆角/尺寸）
+- 3 页面专项稳定结构块对比（`Header / Hero / Content / Footer`）
+- 生成开发可读报告（差异项 + CSS 修复建议 + 优先级）
 
 ## 快速开始
 
 ```bash
-# 1. 安装依赖
+# 1) 安装依赖
 pip install -r requirements.txt
 playwright install chromium
 
-# 2. 填写配置
-cp .env.example .env   # 编辑 .env，填入 token 和 BASE_URL
+# 2) 配置 .env（需自行创建/维护）
+#    最少包含 FIGMA_ACCESS_TOKEN、FIGMA_FILE_KEY、BASE_URL、FIGMA_TARGET_NODE_ID
 
-# 3. 运行测试
-pytest
+# 3) 运行全链路自动代理
+python run_agent.py
 ```
 
----
+## 常用运行命令
 
-## 目录结构与说明
+```bash
+# 全链路（可复用缓存 inventory）
+python run_agent.py
 
-```
-figma-ui-automation/
-│
-├── .env                        # 本地环境变量（不提交 Git）
-│                               # 存放 token、BASE_URL、阈值等敏感/环境配置
-│
-├── .env.example                # .env 模板，展示所有可填字段（可提交）
-│
-├── requirements.txt            # Python 依赖包及版本锁定
-│
-├── pytest.ini                  # pytest 全局配置：测试目录、HTML 报告路径、
-│                               # 自定义 marker、-p no:playwright 禁用冲突插件
-│
-├── VERSION                     # 当前项目版本号，格式 x.y.z
-├── CHANGELOG.md                # 每次版本变更的详细记录
-│
-├── config/
-│   └── config.py               # 全局配置中心
-│                               # 从 .env 读取所有环境变量，统一暴露给项目使用
-│                               # 包含：路径、Figma 凭证、阈值、浏览器、爬取参数、
-│                               #       手工维护的页面注册表 TEST_PAGES
-│
-├── src/                        # 核心功能模块（业务逻辑层）
-│   ├── figma_client.py         # Figma REST API 客户端
-│   │                           # 功能：按 node_id 导出设计稿 PNG、
-│   │                           #       列出文件结构/页面/Frame
-│   │
-│   ├── web_capture.py          # Playwright 网页截图模块
-│   │                           # 功能：启动浏览器、全页截图、元素截图、
-│   │                           #       隐藏动态元素、批量/跨浏览器/响应式截图
-│   │
-│   ├── image_compare.py        # 图像对比模块
-│   │                           # 功能：计算相似度（absdiff/MSE/SSIM）、
-│   │                           #       生成差异高亮图、左右并排对比图、汇总报告
-│   │
-│   ├── page_crawler.py         # 多页面自动发现模块（v1.1.0）
-│   │                           # 功能：BFS 爬取站内页面，从种子路径出发，
-│   │                           #       自动提取可点击链接，限制深度/数量
-│   │
-│   └── report_writer.py        # 结构化 JSON 报告输出（v1.1.0）
-│                               # 功能：把运行结果汇总为 run_result.json，
-│                               #       包含版本、时间、crawl 摘要、各页结果
-│
-├── tests/                      # 测试用例层
-│   ├── conftest.py             # pytest 全局钩子
-│   │                           # 功能：检测 Firefox 是否安装，未装则自动跳过
-│   │
-│   └── test_desktop.py         # 桌面端视觉回归测试
-│                               # TestDesktop      ── 指定页面对比（chromium/firefox）
-│                               # TestCrawlDiscovery ── 多页面自动发现（v1.1.0）
-│
-├── screenshots/                # 截图存储（测试运行时自动创建）
-│   ├── figma/                  # Figma 导出的设计稿 PNG
-│   └── web/                    # 真实网站截图 PNG
-│
-├── reports/                    # 报告存储（测试运行时自动创建）
-│   ├── html/
-│   │   └── report.html         # pytest-html 可视化测试报告（在浏览器打开）
-│   ├── images/
-│   │   ├── *_diff.png          # 差异高亮图（蓝色标注不一致区域）
-│   │   └── *_compare.png       # 左右并排对比图（Figma vs 网站）
-│   └── json/
-│       └── run_result.json     # 结构化 JSON 报告（机器可读，便于 CI 集成）
-│
-└── docs/
-    └── ROADMAP.md              # 功能演进路线（元素级对比、爬取增强等规划）
+# 只做发现+配对+计划，不做实际截图对比
+python run_agent.py --dry
+
+# 强制重新拉取网站/Figma数据
+python run_agent.py --fresh
+
+# 3 页专项稳定结构块 + 元素级差异报告
+python -m src.focused_ui_check
 ```
 
----
+## 3 页专项对比说明
 
-## 测试流程图
+`src.focused_ui_check` 固定对比以下页面：
 
-```
-Figma API ──► figma_client ──► 设计稿 PNG
-                                    │
-                                    ▼
-网站 URL ───► web_capture ──► 网站截图 PNG
-                                    │
-                                    ▼
-                            image_compare
-                          ┌────────────────┐
-                          │  相似度计算     │
-                          │  差异图生成     │
-                          │  断言 >= 阈值   │
-                          └────────────────┘
-                                    │
-                          report_writer ──► run_result.json
-                          pytest-html  ──► report.html
-```
+- Home: `https://newsdrafte.com/`
+- Category: `https://newsdrafte.com/list/Pharmaceuticals`
+- Details: `https://newsdrafte.com/anti-allergy-medications-scientific-overview-of-types-mechanisms-medical-context`
 
----
+输出报告：
 
-## 下一步
+- 可视化 HTML：`reports/focused_ui_report.html`
+- 可读摘要：`reports/focused_ui_summary.md`
+- 页面与块级 JSON：`reports/json/focused_run_result.json`
+- 元素差异 JSON：`reports/json/focused_element_diffs.json`
+- Figma 节点原始 JSON：`reports/json/focused_figma_*.json`
 
-1. 获取 Figma Access Token（个人设置 → Personal access tokens）
-2. 在 Figma 设计稿中右键节点，复制 Node ID（格式：`数字:数字`）
-3. 编辑 `.env` 填入 token、Node ID 和 `BASE_URL`
-4. 运行：`pytest`
+## 报告怎么给开发用
 
-## 版本管理
+- 先看 **Stable-block average similarity**（主指标）
+- 再看 **Top differences**（元素级差异）
+- 按 **Developer fix priorities** 顺序修复（P0/P1/P2）
+- 每个差异项都附带建议样式（如 `font-size` / `color` / `font-family`），可直接用于改 CSS 或 design token
 
-- 当前项目版本: `1.1.3`（见 `VERSION`）
-- 变更记录文件: `CHANGELOG.md`
-- 从 `1.0.0` 开始，每次修改都要新增版本条目并说明：
-  - 变更内容
-  - 影响范围
-  - 回归验证方式
+## 关键配置（`.env`）
 
-## 后续演进规划
+- `FIGMA_ACCESS_TOKEN`
+- `FIGMA_FILE_KEY`
+- `FIGMA_TARGET_NODE_ID`
+- `BASE_URL`
+- `SIMILARITY_THRESHOLD`
+- `AGENT_VIEWPORT_WIDTH`, `AGENT_VIEWPORT_HEIGHT`
+- `AGENT_HIDE_SELECTORS`
+- `PAGE_MATCH_MIN_CONFIDENCE`, `PAGE_MATCH_TOP_K`
+- `PAGE_MATCH_WEIGHT_NAME`, `PAGE_MATCH_WEIGHT_TEXT`, `PAGE_MATCH_WEIGHT_STRUCTURE`, `PAGE_MATCH_WEIGHT_PAGE_TYPE`
+- `COMPARE_COLOR_TOLERANCE`, `COMPARE_SIZE_TOLERANCE`, `COMPARE_FONT_SIZE_TOLERANCE`, `COMPARE_RADIUS_TOLERANCE`
+- `COMPARE_ELEMENT_THRESHOLD`, `COMPARE_MAX_DEPTH`, `COMPARE_MIN_MATCH_COUNT`
 
-- 元素级精准定位与差异输出
-- 多页面自动导航与爬取
-- 实施路线见: `docs/ROADMAP.md`
+## 目录说明（精简）
 
-## v1.1.0 新增配置（可选）
+- `run_agent.py`: 自动测试代理入口
+- `config/config.py`: 全局配置中心
+- `src/run_orchestrator.py`: 发现→索引→配对→计划→执行→报告
+- `src/page_crawler.py`: 网站页面发现
+- `src/figma_page_indexer.py`: Figma 页面索引
+- `src/page_matcher.py`: 页面自动配对
+- `src/image_compare.py`: 截图相似度与差异图
+- `src/element_compare.py`: 元素属性级对比
+- `src/focused_ui_check.py`: 3 页专项稳定结构块报告
+- `reports/`: 运行产出（JSON / HTML / 图片）
 
-可在 `.env` 增加以下项控制多页面发现：
+## 注意事项
 
-- `CRAWL_ENABLED=true`
-- `CRAWL_MAX_DEPTH=2`
-- `CRAWL_MAX_PAGES=20`
-- `CRAWL_MAX_CLICKS_PER_PAGE=8`
-- `CRAWL_SEED_PATHS=/,/products,/about`
-- `CRAWL_CLICK_SELECTORS=a[href],button,[role='link'],[role='button']`
-- `CRAWL_EXCLUDE_KEYWORDS=logout,signout,delete,remove`
-
-结构化结果输出到：`reports/json/run_result.json`
-
-## Pytest 与 Playwright 说明
-
-本项目使用 **手写 `sync_playwright()`**（`WebCapture`），与 `pytest-playwright` 插件自带的 asyncio 机制会冲突。因此 `pytest.ini` 中已加入 `-p no:playwright` 禁用该插件。若你需要使用插件提供的 `page` fixture，可去掉该参数并改为异步用例或统一一种用法。
-
-跨浏览器：未安装 Firefox 时，`test_homepage_firefox` 会自动跳过；安装命令：`playwright install firefox`。
+- 本项目对 Figma 只读（读取结构和导出图片），不写回设计稿。
+- Windows 下请避免同时占用 `reports/focused_ui_report.html`（打开文件时重跑可能导致文件锁）。
+- 项目使用 `sync_playwright()`，`pytest.ini` 中已禁用 `pytest-playwright` 插件冲突项。
