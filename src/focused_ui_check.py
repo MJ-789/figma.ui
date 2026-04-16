@@ -14,7 +14,6 @@ Outputs:
 
 from __future__ import annotations
 
-import base64
 import re
 from datetime import datetime
 from pathlib import Path
@@ -98,15 +97,30 @@ STABLE_BLOCKS = [
 _NOISE_NAME_RE = re.compile(r"^(image\s+\d+|frame\s*\d*|group\s*\d*)$", re.IGNORECASE)
 
 
-def _b64(path: str) -> str:
+def _img_src(path: str) -> str:
     p = Path(path)
     if not p.exists():
         return ""
-    return "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode()
+    return p.resolve().as_uri()
 
 
 def _clean_output_dirs() -> None:
     Config.setup_directories()
+    # Remove legacy/non-focused reports so this run keeps a clean output set.
+    legacy_files = [
+        Config.REPORTS_DIR / "report.html",
+        Config.REPORTS_DIR / "verification_summary.md",
+        Config.REPORTS_DIR / "json" / "run_result.json",
+        Config.REPORTS_DIR / "json" / "element_diff.json",
+        Config.REPORTS_DIR / "json" / "page_pairs.json",
+        Config.REPORTS_DIR / "json" / "test_plan.json",
+    ]
+    for file in legacy_files:
+        if file.exists() and file.is_file():
+            try:
+                file.unlink()
+            except PermissionError:
+                pass
     json_dir = Config.REPORTS_DIR / "json"
     for file in json_dir.glob("focused_*"):
         if file.is_file():
@@ -383,7 +397,75 @@ def _build_dev_suggestions(top_diffs: List[Dict[str, Any]]) -> List[str]:
     return suggestions
 
 
+def _issue_counts(top_diffs: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for item in top_diffs:
+        issue = item.get("issue", "unknown")
+        counts[issue] = counts.get(issue, 0) + 1
+    return counts
+
+
 def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
+    page_rows = []
+    issue_keys = ["text_color", "fill_color", "font_family", "font_size", "font_weight", "line_height", "border_radius", "width", "height", "unmatched"]
+    issue_header = "".join(f"<th>{k}</th>" for k in issue_keys)
+    issue_rows = []
+    block_header = "".join(f"<th>{b['label']}</th>" for b in STABLE_BLOCKS)
+    block_rows = []
+    for page in pages:
+        elem = page["element"]
+        issue_count = _issue_counts(page["top_diffs"])
+        page_rows.append(
+            f"<tr><td>{page['label']}</td><td>{page['pixel']['similarity']:.2f}%</td><td>{page['block_avg_similarity']:.2f}%</td>"
+            f"<td>{elem['overall_score']:.2%}</td><td>{elem['coverage_rate']:.2%}</td><td>{elem['total_matched']}</td><td>{elem['total_unmatched']}</td></tr>"
+        )
+        issue_rows.append(
+            "<tr>"
+            f"<td>{page['label']}</td>"
+            + "".join(f"<td>{issue_count.get(k, 0)}</td>" for k in issue_keys)
+            + "</tr>"
+        )
+        block_map = {b["key"]: b["similarity"] for b in page["blocks"]}
+        block_rows.append(
+            "<tr>"
+            f"<td>{page['label']}</td>"
+            + "".join(f"<td>{block_map.get(b['key'], 0.0):.2f}%</td>" for b in STABLE_BLOCKS)
+            + "</tr>"
+        )
+
+    overview_tables = f"""
+<section class="card">
+  <h2>总览表格对比</h2>
+  <h3>页面指标总览</h3>
+  <table>
+    <thead>
+      <tr><th>页面</th><th>整页相似度</th><th>结构块平均相似度</th><th>元素得分</th><th>元素覆盖率</th><th>匹配元素</th><th>未匹配元素</th></tr>
+    </thead>
+    <tbody>
+      {''.join(page_rows)}
+    </tbody>
+  </table>
+  <h3>结构块相似度矩阵</h3>
+  <table>
+    <thead>
+      <tr><th>页面</th>{block_header}</tr>
+    </thead>
+    <tbody>
+      {''.join(block_rows)}
+    </tbody>
+  </table>
+  <h3>差异项频次矩阵（Top Diffs）</h3>
+  <table>
+    <thead>
+      <tr><th>页面</th>{issue_header}</tr>
+    </thead>
+    <tbody>
+      {''.join(issue_rows)}
+    </tbody>
+  </table>
+</section>
+"""
+
     cards = []
     for page in pages:
         pixel = page["pixel"]
@@ -417,9 +499,9 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
 <div class="block-card">
   <div class="block-title">{block['label']} · 相似度 {block['similarity']:.2f}%</div>
   <div class="img-grid block-grid">
-    <div><div class="lbl">Figma</div><img src="{_b64(block['figma_path'])}" /></div>
-    <div><div class="lbl">Website</div><img src="{_b64(block['web_path'])}" /></div>
-    <div><div class="lbl">Diff</div><img src="{_b64(block['diff_path'])}" /></div>
+    <div><div class="lbl">Figma</div><img src="{_img_src(block['figma_path'])}" /></div>
+    <div><div class="lbl">Website</div><img src="{_img_src(block['web_path'])}" /></div>
+    <div><div class="lbl">Diff</div><img src="{_img_src(block['diff_path'])}" /></div>
   </div>
 </div>
 """
@@ -444,10 +526,10 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
   <h3>开发修复建议</h3>
   <ul>{"".join(f"<li>{s}</li>" for s in suggestions) if suggestions else "<li>暂无建议</li>"}</ul>
   <div class="img-grid">
-    <div><div class="lbl">整页 Figma</div><img src="{_b64(pixel['figma_path'])}" /></div>
-    <div><div class="lbl">整页 Website</div><img src="{_b64(pixel['web_path'])}" /></div>
-    <div><div class="lbl">整页 Diff</div><img src="{_b64(pixel['diff_path'])}" /></div>
-    <div><div class="lbl">整页 Side By Side</div><img src="{_b64(pixel['compare_path'])}" /></div>
+    <div><div class="lbl">整页 Figma</div><img src="{_img_src(pixel['figma_path'])}" /></div>
+    <div><div class="lbl">整页 Website</div><img src="{_img_src(pixel['web_path'])}" /></div>
+    <div><div class="lbl">整页 Diff</div><img src="{_img_src(pixel['diff_path'])}" /></div>
+    <div><div class="lbl">整页 Side By Side</div><img src="{_img_src(pixel['compare_path'])}" /></div>
   </div>
   <h3>元素级差异列表（可直接改样式）</h3>
   <table>
@@ -504,6 +586,7 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
     <p>3-page visual + element comparison. Content text is not used as the core matching signal.</p>
   </header>
   <div class="wrap">
+    {overview_tables}
     {''.join(cards)}
   </div>
 </body>
