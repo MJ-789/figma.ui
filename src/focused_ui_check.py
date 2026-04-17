@@ -15,6 +15,7 @@ Outputs:
 from __future__ import annotations
 
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -111,15 +112,39 @@ def _img_src(path: str) -> str:
 
 
 def _clean_output_dirs() -> None:
+    """Wipe all previous run artifacts so every run starts from a clean state.
+
+    Strategy: empty (not delete) every working output directory and remove
+    legacy/unused sibling directories so the reports/ tree stays minimal.
+    """
     Config.setup_directories()
-    # Remove legacy/non-focused reports so this run keeps a clean output set.
+
+    # 1) Empty all working directories (keep the dirs themselves).
+    wipe_dirs = [
+        Config.REPORTS_DIR / "images",
+        Config.REPORTS_DIR / "json",
+        Config.SCREENSHOTS_DIR / "figma",
+        Config.SCREENSHOTS_DIR / "web",
+    ]
+    for d in wipe_dirs:
+        if not d.exists():
+            continue
+        for item in d.iterdir():
+            try:
+                if item.is_file() or item.is_symlink():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+            except PermissionError:
+                # File locked by another process (e.g. browser); skip.
+                pass
+
+    # 2) Remove legacy top-level report files from previous versions.
     legacy_files = [
         Config.REPORTS_DIR / "report.html",
         Config.REPORTS_DIR / "verification_summary.md",
-        Config.REPORTS_DIR / "json" / "run_result.json",
-        Config.REPORTS_DIR / "json" / "element_diff.json",
-        Config.REPORTS_DIR / "json" / "page_pairs.json",
-        Config.REPORTS_DIR / "json" / "test_plan.json",
+        Config.REPORTS_DIR / "focused_ui_report.html",
+        Config.REPORTS_DIR / "focused_ui_summary.md",
     ]
     for file in legacy_files:
         if file.exists() and file.is_file():
@@ -127,46 +152,14 @@ def _clean_output_dirs() -> None:
                 file.unlink()
             except PermissionError:
                 pass
-    json_dir = Config.REPORTS_DIR / "json"
-    for file in json_dir.glob("focused_*"):
-        if file.is_file():
-            try:
-                file.unlink()
-            except PermissionError:
-                pass
-    for file in json_dir.glob("element_diff_*.json"):
-        if file.is_file():
-            try:
-                file.unlink()
-            except PermissionError:
-                pass
-    for target in [
-        Config.REPORTS_DIR / "focused_ui_report.html",
-        Config.REPORTS_DIR / "focused_ui_summary.md",
+
+    # 3) Drop deprecated sibling directories that are no longer used.
+    for legacy_dir in [
+        Config.REPORTS_DIR / "html",              # old pytest-html output
+        Config.SCREENSHOTS_DIR / "site",          # never populated
     ]:
-        if target.exists():
-            try:
-                target.unlink()
-            except PermissionError:
-                pass
-    for file in (Config.REPORTS_DIR / "images").glob("focused_*"):
-        if file.is_file():
-            try:
-                file.unlink()
-            except PermissionError:
-                pass
-    for file in (Config.SCREENSHOTS_DIR / "figma").glob("focused_*"):
-        if file.is_file():
-            try:
-                file.unlink()
-            except PermissionError:
-                pass
-    for file in (Config.SCREENSHOTS_DIR / "web").glob("focused_*"):
-        if file.is_file():
-            try:
-                file.unlink()
-            except PermissionError:
-                pass
+        if legacy_dir.exists():
+            shutil.rmtree(legacy_dir, ignore_errors=True)
 
 
 def _iter_nodes(root: Dict[str, Any]) -> List[Dict[str, Any]]:

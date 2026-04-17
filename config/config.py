@@ -198,8 +198,6 @@ class Config:
         for directory in [
             cls.SCREENSHOTS_DIR / "figma",
             cls.SCREENSHOTS_DIR / "web",
-            cls.SCREENSHOTS_DIR / "site",
-            cls.REPORTS_DIR / "html",
             cls.REPORTS_DIR / "images",
             cls.REPORTS_DIR / "json",
             cls.KNOWLEDGE_DIR,
