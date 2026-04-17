@@ -15,5 +15,9 @@ reports/
 .idea/
 .vscode/
 
+# Cursor IDE 自动生成（@knowledge 引用时创建，无需提交）
+knowledge/
+.knowledge/
+
 # OS
 Thumbs.db
