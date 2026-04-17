@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import os
 import sys
 import tempfile
 from datetime import datetime
@@ -218,12 +219,13 @@ STABLE_BLOCKS = [
 
 _NOISE_NAME_RE = re.compile(r"^(image\s+\d+|frame\s*\d*|group\s*\d*)$", re.IGNORECASE)
 
-# Typography properties are intentionally skipped for this report: the user
-# wants a purely visual/structural comparison (image size, width/height, box
-# colors, radius) — font families and sizes already diverge heavily between
-# Figma's rendering engine and real browsers and add noise rather than
-# actionable info here.
+# 字体排版属性在此模式下跳过：
+#   Figma 的字体渲染引擎（Figma Desktop / Web）与浏览器（Chrome/Safari）
+#   在字距、行高、字重映射上存在系统性偏差，直接对比会产生大量误报。
+#   本模式聚焦"视觉结构"（尺寸/布局/颜色/圆角），字体问题请用像素截图差异图辅助人工判断。
 _SKIP_PROPS = {"font_family", "font_size", "font_weight", "line_height", "text_color"}
+# 用于报告展示（中文名称）
+_SKIP_PROPS_LABELS = ["字体", "字号", "字重", "行高", "文字色"]
 
 
 # Self-contained report folder. Every artifact the user needs to view the
@@ -245,59 +247,118 @@ def _img_src(path: str) -> str:
         return p.name
 
 
-def _clean_output_dirs() -> None:
-    """Wipe previous run artifacts so every run starts fresh.
+def _force_remove(path: Path) -> bool:
+    """删除单个文件，Windows 下自动解除只读属性后重试。
 
-    The focused report folder is nuked wholesale (HTML + every PNG inside),
-    and ``reports/json/`` is emptied. Legacy sibling directories left over
-    from earlier versions are also removed so ``reports/`` stays tidy.
+    返回 True 表示删除成功，False 表示文件被其他进程锁定（如浏览器占用）。
+    """
+    import stat as _stat
+    try:
+        path.unlink()
+        return True
+    except PermissionError:
+        # Windows 常见场景：文件被标记为只读，或浏览器正在查看该文件。
+        # 先尝试去掉只读属性后重试一次。
+        try:
+            path.chmod(_stat.S_IWRITE | _stat.S_IREAD)
+            path.unlink()
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def _clean_dir_contents(directory: Path) -> list:
+    """清空目录内所有文件/子目录，返回无法删除的文件路径列表。"""
+    locked: list = []
+    if not directory.exists():
+        return locked
+    for item in list(directory.iterdir()):
+        try:
+            if item.is_file() or item.is_symlink():
+                if not _force_remove(item):
+                    locked.append(item)
+            elif item.is_dir():
+                # 递归清空子目录；子目录中有锁定文件时也收集
+                sub_locked = _clean_dir_contents(item)
+                locked.extend(sub_locked)
+                if not sub_locked:
+                    try:
+                        item.rmdir()  # 仅当目录已空时移除
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    return locked
+
+
+def _clean_output_dirs() -> None:
+    """每次运行前清空上次产物，确保报告始终是最新内容。
+
+    Windows 注意事项：
+      如果 index.html 正在被浏览器打开（文件被锁定），该文件无法删除。
+      此时清理函数会打印警告并跳过该文件，新内容会直接覆盖写入——
+      刷新浏览器（F5 或 Ctrl+R）即可看到最新报告。
     """
     Config.setup_directories()
 
-    # 1) Fully recreate the self-contained report folder.
+    # 1) 清空自包含报告目录（HTML + 所有 PNG）
+    locked_files: list = []
     if FOCUSED_REPORT_DIR.exists():
-        shutil.rmtree(FOCUSED_REPORT_DIR, ignore_errors=True)
+        locked_files = _clean_dir_contents(FOCUSED_REPORT_DIR)
+        # 若目录已完全清空，删除并重建；否则保留目录（内含锁定文件）
+        if not locked_files:
+            try:
+                FOCUSED_REPORT_DIR.rmdir()
+            except Exception:
+                pass
     FOCUSED_REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 2) Empty reports/json/ (machine-readable outputs live here).
+    if locked_files:
+        print(
+            f"\n[WARN] 以下文件被其他进程锁定，无法删除（通常是浏览器正在查看报告）：\n"
+            + "\n".join(f"       {f}" for f in locked_files)
+            + "\n       → 新内容将直接覆盖写入；刷新浏览器（F5）即可看到最新报告。\n"
+        )
+
+    # 2) 清空 reports/json/（机器可读中间结果）
     json_dir = Config.REPORTS_DIR / "json"
     json_dir.mkdir(parents=True, exist_ok=True)
     for item in json_dir.iterdir():
         try:
             if item.is_file() or item.is_symlink():
-                item.unlink()
+                _force_remove(item)
             elif item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
-        except PermissionError:
+                _clean_dir_contents(item)
+        except Exception:
             pass
 
-    # 3) Drop legacy top-level report files from previous versions.
-    legacy_files = [
+    # 3) 清理旧版遗留文件
+    for legacy_file in [
         Config.REPORTS_DIR / "report.html",
         Config.REPORTS_DIR / "verification_summary.md",
         Config.REPORTS_DIR / "focused_ui_report.html",
         Config.REPORTS_DIR / "focused_ui_summary.md",
-    ]
-    for file in legacy_files:
-        if file.exists() and file.is_file():
-            try:
-                file.unlink()
-            except PermissionError:
-                pass
+    ]:
+        if legacy_file.exists():
+            _force_remove(legacy_file)
 
-    # 4) Drop deprecated sibling directories. They used to hold screenshots
-    #    / diff images that are now bundled inside FOCUSED_REPORT_DIR, and
-    #    other scripts (run_orchestrator) may still create them if run.
+    # 4) 清理旧版目录结构
     for legacy_dir in [
         Config.REPORTS_DIR / "html",
         Config.REPORTS_DIR / "images",
         Config.SCREENSHOTS_DIR / "figma",
         Config.SCREENSHOTS_DIR / "web",
         Config.SCREENSHOTS_DIR / "site",
-        Config.SCREENSHOTS_DIR,  # the now-unused root itself
+        Config.SCREENSHOTS_DIR,
     ]:
         if legacy_dir.exists():
-            shutil.rmtree(legacy_dir, ignore_errors=True)
+            _clean_dir_contents(legacy_dir)
+            try:
+                legacy_dir.rmdir()
+            except Exception:
+                pass
 
 
 def _iter_nodes(root: Dict[str, Any], max_depth: int = -1) -> List[Tuple[int, Dict[str, Any]]]:
@@ -959,6 +1020,38 @@ def _render_function_global_html(agg: Dict[str, Any]) -> str:
 """
 
 
+def _safe_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """写文件，Windows 文件锁场景下通过临时文件 + 重命名实现原子覆盖。
+
+    直接 write_text() 在 Windows 上如果文件被浏览器以独占方式打开会抛
+    PermissionError。改用 tempfile 写入同目录临时文件后重命名，可绕过大部分
+    "文件正在被查看"的锁，确保每次运行后报告内容都是最新的。
+    """
+    import tempfile as _tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # 先尝试直接写入（最快路径）
+    try:
+        path.write_text(content, encoding=encoding)
+        return
+    except PermissionError:
+        pass
+    # 回退：写临时文件后 os.replace()（原子重命名，即使目标存在也成功）
+    try:
+        fd, tmp = _tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding=encoding) as f:
+                f.write(content)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+            raise
+    except Exception as exc:
+        print(f"[WARN] 无法写入 {path.name}: {exc}  → 刷新浏览器 (F5) 后重试")
+
+
 def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], output_path: Path) -> Path:
     page_rows = []
     # Visual/structural issues only — typography properties are skipped at
@@ -1096,6 +1189,12 @@ def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], outp
     <div><div class="lbl">整页 Side By Side</div><img src="{_img_src(pixel['compare_path'])}" /></div>
   </div>
   <h3>元素级差异列表（可直接改样式）</h3>
+  <p style="font-size:12px;color:#6b7280;margin:0 0 10px;background:#eff6ff;border:1px solid #bfdbfe;
+     border-radius:6px;padding:8px 12px;">
+    ℹ️ <b>已跳过字体属性对比</b>（{', '.join(_SKIP_PROPS_LABELS)}）：
+    Figma 渲染引擎与浏览器存在系统性字体差异，直接对比噪音多于信号。
+    字体问题请通过上方像素差异图辅助人工判断。
+  </p>
   <table>
     <thead>
       <tr><th>Figma 元素</th><th>差异项</th><th>现状</th><th>建议修复</th></tr>
@@ -1159,7 +1258,7 @@ def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], outp
 <body>
   <header>
     <h1>Focused UI Report</h1>
-    <p>3-page visual + element comparison. Content text is not used as the core matching signal.</p>
+    <p>多页面视觉 + 元素属性对比 · 生成时间: {datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")}</p>
   </header>
   <div class="wrap">
     {overview_tables}
@@ -1168,7 +1267,7 @@ def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], outp
   </div>
 </body>
 </html>"""
-    output_path.write_text(html, encoding="utf-8")
+    _safe_write_text(output_path, html)
     return output_path
 
 
@@ -1263,7 +1362,7 @@ def _render_markdown(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], 
             )
     lines.append("")
 
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    _safe_write_text(output_path, "\n".join(lines))
     return output_path
 
 
@@ -1482,6 +1581,18 @@ def run() -> Dict[str, Any]:
                 "result": result,
                 "auto_mapped_count": len(auto_map),
                 "stable_blocks": block_results,
+                # 明确记录跳过的属性，供报告层展示说明
+                "skipped_props": sorted(_SKIP_PROPS),
+                "skipped_props_reason": (
+                    "字体渲染差异（Figma 引擎 vs 浏览器）导致系统性误报，"
+                    "已从元素属性对比中排除。请通过像素差异图辅助排查字体问题。"
+                ),
+                "compare_config": {
+                    "color_tolerance":     Config.COMPARE_COLOR_TOLERANCE,
+                    "size_tolerance":      Config.COMPARE_SIZE_TOLERANCE,
+                    "font_size_tolerance": Config.COMPARE_FONT_SIZE_TOLERANCE,
+                    "radius_tolerance":    Config.COMPARE_RADIUS_TOLERANCE,
+                },
             }
             ReportWriter._write_json(Config.REPORTS_DIR / "json" / f"element_diff_{key}.json", element_payload)
             block_avg = round(sum(x["similarity"] for x in block_results) / len(block_results), 2) if block_results else 0.0

@@ -1,10 +1,11 @@
 {
-  "_description": "功能验证链接清单（EN/NL）。统一按 Home 样式基线验证；key 使用 home_* 系列避免报告文件名冲突。",
+  "_description": "聚焦对比页面清单。支持两种配法（可混用）：\n  A) 短格式：写 figma_node(节点ID) + site_path(相对路径) → file_key/host 取自 .env\n  B) 完整URL：写 figma_url(完整Figma链接) + site_url(完整站点链接)\n  当多个页面对应不同设计稿区域时，建议每条记录单独填写 figma_node 或 figma_url，\n  避免用同一节点对比结构差异较大的页面（会产生大量无意义的差异报告）。",
   "pages": [
     {
       "key": "home_en",
       "label": "Home (EN)",
-      "site_path": "/"
+      "site_path": "/",
+      "_note": "figma_node 未填时自动使用 .env 的 FIGMA_TARGET_NODE_ID"
     },
     {
       "key": "home_nl",
@@ -14,7 +15,8 @@
     {
       "key": "home_games_en",
       "label": "Home Style - Games (EN)",
-      "site_path": "/games/trial-bike"
+      "site_path": "/games/trial-bike",
+      "_note": "此页与 Home 共用同一 Figma 节点（Header/Footer 样式基线验证）。若游戏页有专属设计稿，请补充 figma_node 字段，例如: \"figma_node\": \"15480:200\""
     },
     {
       "key": "home_games_nl",
@@ -31,5 +33,20 @@
       "label": "Home Style - Tricks (NL)",
       "site_path": "/nl/tricks"
     }
-  ]
+  ],
+  "_examples": {
+    "_doc": "以下为参考用法示例，实际使用时删除 _examples 块",
+    "per_page_node": {
+      "key": "games_page",
+      "label": "Games Landing",
+      "figma_node": "15480:200",
+      "site_path": "/games"
+    },
+    "full_url": {
+      "key": "about_page",
+      "label": "About Us",
+      "figma_url": "https://www.figma.com/design/FILEKEY/Slug?node-id=100-200",
+      "site_url": "https://example.com/about"
+    }
+  }
 }

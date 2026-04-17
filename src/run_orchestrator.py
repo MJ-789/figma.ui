@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from config.config import Config
 
@@ -185,9 +185,19 @@ class RunOrchestrator:
         from src.figma_client import FigmaClient
         from src.web_capture import WebCapture
         from src.image_compare import ImageCompare
+        from src.figma_extractor import FigmaExtractor
+        from src.dom_extractor import DOMExtractor
+        from src.auto_mapper import AutoMapper
+        from src.element_compare import ElementCompare
 
         figma_client = FigmaClient()
         comparator = ImageCompare(threshold=Config.SIMILARITY_THRESHOLD)
+        figma_extractor = FigmaExtractor()
+        dom_extractor = DOMExtractor()
+        auto_mapper = AutoMapper()
+        elem_compare = ElementCompare()
+        # 噪音层名过滤：自动生成的 Frame/Group/Image 编号命名无对应 DOM 元素
+        _noise_re = re.compile(r"^(image\s+\d+|frame\s*\d*|group\s*\d*)$", re.IGNORECASE)
         page_results: List[Dict[str, Any]] = []
 
         with WebCapture(
@@ -213,8 +223,10 @@ class RunOrchestrator:
 
                 print(f"\n      [{item['plan_id']}] {item['figma_name']!r} vs {item['site_url']!r}")
 
-                # 5a: 获取 Figma 设计稿截图
+                # 5a: 获取 Figma 设计稿截图（同时缓存节点 JSON 供元素对比用）
+                node_json: Optional[Dict[str, Any]] = None
                 try:
+                    node_json = figma_client.get_node_json(node_id=item["figma_node_id"])
                     figma_client.save_node_to_file(
                         node_id=item["figma_node_id"],
                         output_path=figma_path,
@@ -226,7 +238,7 @@ class RunOrchestrator:
                     page_results.append(self._error_result(item, f"figma_export:{type(exc).__name__}"))
                     continue
 
-                # 5b: 获取网站截图
+                # 5b: 获取网站截图（页面保持打开以供后续元素提取）
                 try:
                     vp = item.get("viewport", {})
                     if vp:
@@ -235,6 +247,8 @@ class RunOrchestrator:
                     hide = item.get("hide_selectors", [])
                     if hide:
                         capture.hide_elements(hide)
+                    # 滚回顶部确保首屏状态与设计稿一致
+                    capture.page.evaluate("window.scrollTo(0, 0)")
                     capture.page.screenshot(path=str(web_path), full_page=True)
                     print(f"        网站截图: {web_path.name}")
                 except Exception as exc:
@@ -242,9 +256,15 @@ class RunOrchestrator:
                     page_results.append(self._error_result(item, f"web_capture:{type(exc).__name__}"))
                     continue
 
-                # 5c: 对比
+                # 5c: 像素级对比
+                similarity = 0.0
+                mse_val: Optional[float] = None
                 try:
                     similarity = comparator.calculate_similarity(figma_path, web_path)
+                    try:
+                        mse_val = float(comparator.calculate_mse(figma_path, web_path))
+                    except Exception:
+                        pass
                     comparator.generate_diff_image(figma_path, web_path, diff_path)
                     comparator.generate_side_by_side(
                         figma_path, web_path, compare_path,
@@ -252,25 +272,79 @@ class RunOrchestrator:
                     )
                     passed = similarity >= Config.SIMILARITY_THRESHOLD
                     status_label = "PASS" if passed else "FAIL"
-                    print(f"        相似度: {similarity:.1f}%  阈值: {Config.SIMILARITY_THRESHOLD}%  → {status_label}")
+                    print(f"        像素相似度: {similarity:.1f}%  阈值: {Config.SIMILARITY_THRESHOLD}%  → {status_label}")
 
                     page_results.append({
                         "plan_id": item["plan_id"],
                         "figma_name": item["figma_name"],
                         "site_url": item["site_url"],
                         "site_path": item["site_path"],
+                        "browser": Config.DEFAULT_BROWSER,
                         "similarity": float(similarity),
+                        "mse": round(mse_val, 2) if mse_val is not None else None,
                         "threshold": float(Config.SIMILARITY_THRESHOLD),
                         "passed": passed,
                         "figma_image": str(figma_path),
                         "web_image": str(web_path),
                         "diff_image": str(diff_path),
                         "compare_image": str(compare_path),
+                        "element_result": None,
                         "status": "ok",
                     })
                 except Exception as exc:
-                    print(f"        [ERROR] 对比失败: {exc}")
+                    print(f"        [ERROR] 像素对比失败: {exc}")
                     page_results.append(self._error_result(item, f"compare:{type(exc).__name__}"))
+                    continue
+
+                # 5d: 元素属性级对比（在已打开的页面上直接提取 DOM 计算样式）
+                if node_json:
+                    try:
+                        figma_elems = figma_extractor.extract_semantic(
+                            node_json, max_depth=Config.COMPARE_MAX_DEPTH
+                        )
+                        # 过滤极小节点和自动命名噪音层
+                        figma_elems = [
+                            e for e in figma_elems
+                            if e.width >= 12 and e.height >= 12
+                            and not _noise_re.match((e.name or "").strip())
+                        ]
+                        root_frame = next(
+                            (e for e in figma_elems if e.node_type in ("FRAME", "COMPONENT")),
+                            None,
+                        )
+                        # 用 Figma 坐标自动定位对应 DOM 元素（TEXT 按位置匹配，非 TEXT 按 IoU）
+                        auto_map = auto_mapper.generate(
+                            figma_elements=figma_elems,
+                            page=capture.page,
+                            root_frame=root_frame,
+                        )
+                        dom_elems = dom_extractor.extract(
+                            capture.page,
+                            list(dict.fromkeys(auto_map.values())),
+                        )
+                        elem_result = elem_compare.compare(
+                            figma_elements=figma_elems,
+                            dom_elements=dom_elems,
+                            element_map={},
+                            id_element_map=auto_map,
+                            threshold=Config.COMPARE_ELEMENT_THRESHOLD,
+                            color_tol=Config.COMPARE_COLOR_TOLERANCE,
+                            size_tol=Config.COMPARE_SIZE_TOLERANCE,
+                            font_size_tol=Config.COMPARE_FONT_SIZE_TOLERANCE,
+                            radius_tol=Config.COMPARE_RADIUS_TOLERANCE,
+                            min_match_count=Config.COMPARE_MIN_MATCH_COUNT,
+                        )
+                        page_results[-1]["element_result"] = elem_result
+                        page_results[-1]["auto_mapped_count"] = len(auto_map)
+                        elem_passed = "✅" if elem_result.get("overall_passed") else "❌"
+                        print(
+                            f"        元素对比: 匹配 {elem_result['total_matched']}/"
+                            f"{elem_result['total_matched'] + elem_result['total_unmatched']}  "
+                            f"得分 {elem_result['overall_score']:.2f}  {elem_passed}"
+                        )
+                    except Exception as exc:
+                        print(f"        [WARN] 元素对比跳过: {type(exc).__name__}: {exc}")
+                        page_results[-1]["element_result"] = None
 
         results["steps"]["execute"] = {
             "status": "ok",
@@ -300,6 +374,32 @@ class RunOrchestrator:
         )
         print(f"      JSON 报告: {Config.JSON_REPORT_PATH}")
 
+        # 把每页的元素对比结果单独写入 element_diff.json 供 html_reporter 消费
+        elem_diffs = [
+            {
+                "page_name": r.get("figma_name", ""),
+                "browser": r.get("browser", Config.DEFAULT_BROWSER),
+                "figma_node": r.get("plan_id", ""),
+                "result": r.get("element_result"),
+                "compare_config": {
+                    "color_tolerance": Config.COMPARE_COLOR_TOLERANCE,
+                    "size_tolerance": Config.COMPARE_SIZE_TOLERANCE,
+                    "font_size_tolerance": Config.COMPARE_FONT_SIZE_TOLERANCE,
+                    "radius_tolerance": Config.COMPARE_RADIUS_TOLERANCE,
+                },
+            }
+            for r in page_results
+            if r.get("status") == "ok" and r.get("element_result") is not None
+        ]
+        if elem_diffs:
+            import json as _json
+            Config.ELEMENT_DIFF_PATH.parent.mkdir(parents=True, exist_ok=True)
+            Config.ELEMENT_DIFF_PATH.write_text(
+                _json.dumps({"diffs": elem_diffs}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"      元素对比: {Config.ELEMENT_DIFF_PATH}")
+
         total_ok = sum(1 for r in page_results if r.get("status") == "ok")
         total_pass = sum(1 for r in page_results if r.get("passed"))
         total_fail = total_ok - total_pass
@@ -320,8 +420,13 @@ class RunOrchestrator:
             "figma_name": item.get("figma_name", ""),
             "site_url": item.get("site_url", ""),
             "site_path": item.get("site_path", ""),
-            "similarity": 0.0,
+            "browser": Config.DEFAULT_BROWSER,
+            # None 而非 0.0，避免与真实相似度为 0% 的结果混淆
+            "similarity": None,
+            "mse": None,
             "threshold": float(Config.SIMILARITY_THRESHOLD),
             "passed": False,
+            "element_result": None,
+            "error_detail": error,
             "status": f"error:{error}",
         }
