@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +29,7 @@ from src.dom_extractor import DOMExtractor
 from src.element_compare import ElementCompare
 from src.figma_client import FigmaClient
 from src.figma_extractor import FigmaExtractor
+from src.function_check import FunctionChecker
 from src.image_compare import ImageCompare
 from src.report_writer import ReportWriter
 from src.web_capture import WebCapture
@@ -162,13 +164,17 @@ def _clean_output_dirs() -> None:
             shutil.rmtree(legacy_dir, ignore_errors=True)
 
 
-def _iter_nodes(root: Dict[str, Any]) -> List[Dict[str, Any]]:
-    result = []
-    stack = [root]
+def _iter_nodes(root: Dict[str, Any], max_depth: int = -1) -> List[Tuple[int, Dict[str, Any]]]:
+    """DFS over the Figma node tree, yielding (depth, node)."""
+    result: List[Tuple[int, Dict[str, Any]]] = []
+    stack: List[Tuple[int, Dict[str, Any]]] = [(0, root)]
     while stack:
-        node = stack.pop()
-        result.append(node)
-        stack.extend(reversed(node.get("children", [])))
+        depth, node = stack.pop()
+        result.append((depth, node))
+        if max_depth >= 0 and depth >= max_depth:
+            continue
+        for child in reversed(node.get("children", []) or []):
+            stack.append((depth + 1, child))
     return result
 
 
@@ -182,40 +188,100 @@ def _node_box(node: Dict[str, Any]) -> Optional[Tuple[float, float, float, float
     return x, y, w, h
 
 
+# Per-block constraints used when picking a Figma layer as the visual block.
+# A valid match must (a) live in the top 2 levels of the frame so we don't
+# accidentally pick a deeply nested icon/text node, (b) span a significant
+# fraction of the frame's width, (c) be tall enough to be a real block, and
+# (d) NOT be so tall that it swallows multiple sibling sections.
+# The max_height_ratio cap is critical: without it, ``content`` picks the
+# mega-wrapper that stacks every card, and the web side is forced to do a
+# scroll capture of the whole page instead of a single card-level compare.
+_BLOCK_CONSTRAINTS = {
+    "header":  {"max_depth": 2, "min_width_ratio": 0.6, "min_height": 40,  "max_height_ratio": 0.20, "max_height_px": 400,  "y_rel_range": (0.0, 0.25)},
+    "footer":  {"max_depth": 2, "min_width_ratio": 0.6, "min_height": 60,  "max_height_ratio": 0.30, "max_height_px": 900,  "y_rel_range": (0.55, 1.0)},
+    "hero":    {"max_depth": 2, "min_width_ratio": 0.6, "min_height": 200, "max_height_ratio": 0.45, "max_height_px": 1100, "y_rel_range": (0.03, 0.45)},
+    "content": {"max_depth": 2, "min_width_ratio": 0.6, "min_height": 200, "max_height_ratio": 0.35, "max_height_px": 900,  "y_rel_range": (0.15, 0.9)},
+}
+
+
 def _pick_figma_block_node(root: Dict[str, Any], block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Pick a top-level-ish Figma layer matching a stable block.
+
+    Rules:
+    - Limit search to the upper levels of the frame (``max_depth``) so small
+      nested nodes (icons, labels inside a card) never win.
+    - Require the candidate to be nearly full-width so we never pick a
+      badge/column inside the real block.
+    - Require a minimum height per block type to filter out thin labels.
+    - Prefer candidates whose relative Y position matches the block role
+      (header near top, footer near bottom, hero near the first screen, etc).
+    - If a pattern/keyword match exists it wins; otherwise we fall back to the
+      best-positioned candidate purely by geometry, which is way more robust
+      than trusting every designer's naming convention.
+    """
     root_box = _node_box(root)
     if not root_box:
         return None
     rx, ry, rw, rh = root_box
-    candidates = []
+    key = block["key"]
+    rules = _BLOCK_CONSTRAINTS.get(
+        key,
+        {"max_depth": 2, "min_width_ratio": 0.6, "min_height": 80, "max_height_ratio": 1.0, "y_rel_range": (0.0, 1.0)},
+    )
+    max_depth = rules["max_depth"]
+    min_w = rw * rules["min_width_ratio"]
+    min_h = rules["min_height"]
+    # Cap by the tighter of (ratio of root, absolute px budget).
+    max_h_ratio = rh * rules.get("max_height_ratio", 1.0)
+    max_h_abs = rules.get("max_height_px", 100000)
+    max_h = min(max_h_ratio, max_h_abs)
+    y_lo, y_hi = rules["y_rel_range"]
     patterns = [p.lower() for p in block["figma_patterns"]]
-    for node in _iter_nodes(root):
+
+    named_candidates: List[Tuple[float, Dict[str, Any]]] = []
+    geom_candidates: List[Tuple[float, Dict[str, Any]]] = []
+
+    for depth, node in _iter_nodes(root, max_depth=max_depth):
+        if depth == 0:
+            continue  # skip the root itself
         box = _node_box(node)
         if not box:
             continue
         x, y, w, h = box
-        if w < 40 or h < 20:
+        if w < min_w or h < min_h:
             continue
-        name = (node.get("name") or "").lower()
-        if not any(p in name for p in patterns):
+        if h > max_h:
+            # Reject wrappers that stack multiple sibling sections.
             continue
         y_rel = (y - ry) / max(rh, 1)
-        h_rel = h / max(rh, 1)
-        area_rel = (w * h) / max(rw * rh, 1)
-        key = block["key"]
+        if not (y_lo <= y_rel <= y_hi):
+            continue
+
+        # Positional score tuned per block role.
         if key == "header":
-            score = (1 - min(max(y_rel, 0), 1)) * 1.8 + max(0, 0.25 - abs(h_rel - 0.1)) + area_rel
+            pos_score = max(0.0, 1.0 - y_rel * 4)  # earlier == better
         elif key == "footer":
-            score = min(max(y_rel, 0), 1) * 1.8 + max(0, 0.25 - abs(h_rel - 0.1)) + area_rel
+            pos_score = max(0.0, (y_rel - 0.55) * 2)  # later == better
         elif key == "hero":
-            score = max(0, 1 - abs(y_rel - 0.2)) + area_rel * 1.6
+            pos_score = max(0.0, 1.0 - abs(y_rel - 0.18) * 3)
+        else:  # content
+            pos_score = max(0.0, 1.0 - abs(y_rel - 0.5) * 2)
+
+        width_score = w / max(rw, 1)
+        height_score = min(1.0, h / max(rh, 1) * 4)
+        score = pos_score * 1.5 + width_score * 1.0 + height_score * 0.5
+
+        name = (node.get("name") or "").lower()
+        if any(p in name for p in patterns):
+            named_candidates.append((score + 0.8, node))
         else:
-            score = max(0, 1 - abs(y_rel - 0.55)) + area_rel * 1.4
-        candidates.append((score, node))
-    if not candidates:
+            geom_candidates.append((score, node))
+
+    pool = named_candidates or geom_candidates
+    if not pool:
         return None
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1]
+    pool.sort(key=lambda item: item[0], reverse=True)
+    return pool[0][1]
 
 
 def _ratio_to_abs_box(root_box: Tuple[float, float, float, float], ratio: List[float]) -> Tuple[float, float, float, float]:
@@ -262,18 +328,106 @@ def _crop_by_ratio_from_image(img_path: Path, ratio: List[float], output_path: P
     return output_path
 
 
-def _screenshot_web_block(page, selectors: List[str], output_path: Path) -> bool:
+def _crop_web_block_from_full(
+    page,
+    selectors: List[str],
+    full_web_path: Path,
+    output_path: Path,
+) -> Optional[Tuple[float, float, float, float]]:
+    """Locate a DOM element and crop it out of the full-page web screenshot.
+
+    We deliberately avoid ``locator.screenshot()`` here: taking an element-only
+    screenshot forces Playwright to scroll the element into view, which can
+    re-lay out sticky headers and produce visuals that do NOT match the
+    coordinate system of the full-page image. Cropping from the full image
+    keeps the web block in the same coordinate frame as the Figma design.
+
+    Returns the page-absolute bounding box (x, y, w, h) in CSS px, or None.
+    """
     for selector in selectors:
         try:
-            loc = page.locator(selector).first
-            box = loc.bounding_box()
-            if not box or box.get("width", 0) < 20 or box.get("height", 0) < 20:
+            handle = page.locator(selector).first
+            count = handle.count()
+            if count == 0:
                 continue
-            loc.screenshot(path=str(output_path))
-            return True
+            # DOMRect (viewport-relative) + scroll offset = absolute page coords
+            rect = handle.evaluate(
+                "el => { const r = el.getBoundingClientRect();"
+                "return { x: r.left + window.scrollX,"
+                "         y: r.top + window.scrollY,"
+                "         w: r.width, h: r.height }; }"
+            )
         except Exception:
             continue
-    return False
+        if not rect:
+            continue
+        x, y, w, h = rect.get("x", 0), rect.get("y", 0), rect.get("w", 0), rect.get("h", 0)
+        if w < 40 or h < 20:
+            continue
+        try:
+            img = Image.open(full_web_path)
+        except Exception:
+            return None
+        left = int(max(0, x))
+        top = int(max(0, y))
+        right = int(min(img.width, left + w))
+        bottom = int(min(img.height, top + h))
+        if right <= left or bottom <= top:
+            continue
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        img.crop((left, top, right, bottom)).save(output_path)
+        return (float(x), float(y), float(w), float(h))
+    return None
+
+
+def _normalize_pair_for_compare(
+    img1_path: Path,
+    img2_path: Path,
+    out1_path: Path,
+    out2_path: Path,
+) -> Tuple[Path, Path]:
+    """Align two images for fair pixel comparison without stretching.
+
+    - Scale both images to the SAME target width (the larger of the two),
+      preserving aspect ratio (so no horizontal squashing).
+    - Pad the shorter image with white to match the taller one, so both
+      final images share the exact same canvas size.
+
+    This way, a design block that is physically taller than its web
+    counterpart will show up as an obvious "extra region" in the diff,
+    instead of being squashed into the web block's height.
+    """
+    img1 = Image.open(img1_path).convert("RGB")
+    img2 = Image.open(img2_path).convert("RGB")
+
+    target_w = max(img1.width, img2.width)
+
+    def _scale_width(img: Image.Image, w: int) -> Image.Image:
+        if img.width == w:
+            return img
+        ratio = w / img.width
+        new_h = max(1, int(round(img.height * ratio)))
+        return img.resize((w, new_h), Image.Resampling.LANCZOS)
+
+    img1 = _scale_width(img1, target_w)
+    img2 = _scale_width(img2, target_w)
+    target_h = max(img1.height, img2.height)
+
+    def _pad_bottom(img: Image.Image, h: int) -> Image.Image:
+        if img.height == h:
+            return img
+        canvas = Image.new("RGB", (img.width, h), (255, 255, 255))
+        canvas.paste(img, (0, 0))
+        return canvas
+
+    img1 = _pad_bottom(img1, target_h)
+    img2 = _pad_bottom(img2, target_h)
+
+    out1_path.parent.mkdir(parents=True, exist_ok=True)
+    out2_path.parent.mkdir(parents=True, exist_ok=True)
+    img1.save(out1_path)
+    img2.save(out2_path)
+    return out1_path, out2_path
 
 
 def _element_in_boxes(element, boxes: List[Tuple[float, float, float, float]]) -> bool:
@@ -404,6 +558,114 @@ def _issue_counts(top_diffs: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
+def _escape_html(value: Any) -> str:
+    """Minimal HTML escape for cell text to avoid breaking the table markup."""
+    s = "" if value is None else str(value)
+    return (
+        s.replace("&", "&amp;")
+         .replace("<", "&lt;")
+         .replace(">", "&gt;")
+         .replace('"', "&quot;")
+    )
+
+
+def _render_function_section_html(fn: Dict[str, Any]) -> str:
+    """Render the per-page Functional check section (links + buttons + errors)."""
+    if not fn or fn.get("error"):
+        err = fn.get("error", "") if fn else ""
+        return (
+            "<h3>功能检测</h3>"
+            f"<div class='empty'>功能检测未生成{(': ' + _escape_html(err)) if err else ''}</div>"
+        )
+    summary = fn.get("summary", {})
+    links = fn.get("links", []) or []
+    buttons = fn.get("buttons", []) or []
+    console_errors = fn.get("console_errors", []) or []
+    page_errors = fn.get("page_errors", []) or []
+    failed_reqs = fn.get("failed_requests", []) or []
+
+    link_rows = []
+    for l in links:
+        ok = l.get("ok")
+        status = l.get("status")
+        status_cell = f"{status}" if status is not None else "—"
+        cls = "ok" if ok else "fail"
+        text = _escape_html((l.get("text") or "").strip() or "(无文案)")
+        href = _escape_html(l.get("href", ""))
+        err = _escape_html(l.get("error", ""))
+        link_rows.append(
+            "<tr>"
+            f"<td>{text}</td>"
+            f"<td><a href='{href}' target='_blank' rel='noopener'>{href}</a></td>"
+            f"<td class='{cls}'>{status_cell}</td>"
+            f"<td>{l.get('elapsed_ms', 0)} ms</td>"
+            f"<td class='{cls}'>{'OK' if ok else 'FAIL'}</td>"
+            f"<td>{err}</td>"
+            "</tr>"
+        )
+    if not link_rows:
+        link_rows.append("<tr><td colspan='6' class='empty'>未发现可见链接</td></tr>")
+
+    button_rows = []
+    for b in buttons:
+        status = b.get("status", "")
+        cls = {
+            "ok": "ok",
+            "navigated": "warn",
+            "skipped": "muted",
+            "enumerated": "muted",
+            "console_error": "fail",
+            "click_failed": "fail",
+            "not_found": "fail",
+        }.get(status, "muted")
+        text = _escape_html((b.get("text") or "").strip() or "(无文案)")
+        extra = b.get("navigated_to") or b.get("error") or b.get("reason") or ""
+        button_rows.append(
+            "<tr>"
+            f"<td>{text}</td>"
+            f"<td class='{cls}'>{_escape_html(status)}</td>"
+            f"<td>{_escape_html(extra)}</td>"
+            "</tr>"
+        )
+    if not button_rows:
+        button_rows.append("<tr><td colspan='3' class='empty'>未发现可见按钮</td></tr>")
+
+    err_items = []
+    for item in console_errors[:10]:
+        err_items.append(f"<li><code>console</code> {_escape_html(item)}</li>")
+    for item in page_errors[:10]:
+        err_items.append(f"<li><code>pageerror</code> {_escape_html(item)}</li>")
+    for item in failed_reqs[:10]:
+        err_items.append(
+            f"<li><code>{item.get('status','?')}</code> "
+            f"<code>{_escape_html(item.get('method','GET'))}</code> "
+            f"{_escape_html(item.get('url',''))}</li>"
+        )
+    errors_html = f"<ul class='err-list'>{''.join(err_items)}</ul>" if err_items else "<div class='empty'>无异常记录</div>"
+
+    return f"""
+<h3>功能检测</h3>
+<div class="stats">
+  <div><b>链接 · 通过</b><span>{summary.get('link_total', 0) - summary.get('link_failed', 0)} / {summary.get('link_total', 0)}</span></div>
+  <div><b>按钮 · 通过</b><span>{summary.get('button_total', 0) - summary.get('button_failed', 0)} / {summary.get('button_total', 0)}</span></div>
+  <div><b>Console 错误</b><span>{summary.get('console_errors', 0)}</span></div>
+  <div><b>4xx/5xx 请求</b><span>{summary.get('failed_requests', 0)}</span></div>
+</div>
+<h4>链接跳转验证</h4>
+<table>
+  <thead><tr><th>文案</th><th>URL</th><th>状态码</th><th>耗时</th><th>结果</th><th>备注</th></tr></thead>
+  <tbody>{''.join(link_rows)}</tbody>
+</table>
+<h4>按钮点击结果</h4>
+<table>
+  <thead><tr><th>按钮文案</th><th>状态</th><th>详情</th></tr></thead>
+  <tbody>{''.join(button_rows)}</tbody>
+</table>
+<h4>异常记录（Console / PageError / 失败请求）</h4>
+{errors_html}
+"""
+
+
 def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
     page_rows = []
     issue_keys = ["text_color", "fill_color", "font_family", "font_size", "font_weight", "line_height", "border_radius", "width", "height", "unmatched"]
@@ -411,6 +673,7 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
     issue_rows = []
     block_header = "".join(f"<th>{b['label']}</th>" for b in STABLE_BLOCKS)
     block_rows = []
+    function_rows = []
     for page in pages:
         elem = page["element"]
         issue_count = _issue_counts(page["top_diffs"])
@@ -430,6 +693,26 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
             f"<td>{page['label']}</td>"
             + "".join(f"<td>{block_map.get(b['key'], 0.0):.2f}%</td>" for b in STABLE_BLOCKS)
             + "</tr>"
+        )
+        fn_summary = (page.get("function_check") or {}).get("summary", {})
+        link_total = fn_summary.get("link_total", 0)
+        link_failed = fn_summary.get("link_failed", 0)
+        btn_total = fn_summary.get("button_total", 0)
+        btn_failed = fn_summary.get("button_failed", 0)
+        link_rate_str = f"{fn_summary.get('link_pass_rate', 0):.1f}%" if link_total else "—"
+        btn_rate_str = f"{fn_summary.get('button_pass_rate', 0):.1f}%" if btn_total else "—"
+        function_rows.append(
+            "<tr>"
+            f"<td>{page['label']}</td>"
+            f"<td>{link_total}</td>"
+            f"<td class='{'fail' if link_failed else ('ok' if link_total else 'muted')}'>{link_failed}</td>"
+            f"<td>{link_rate_str}</td>"
+            f"<td>{btn_total}</td>"
+            f"<td class='{'fail' if btn_failed else ('ok' if btn_total else 'muted')}'>{btn_failed}</td>"
+            f"<td>{btn_rate_str}</td>"
+            f"<td class='{'fail' if fn_summary.get('console_errors', 0) else 'ok'}'>{fn_summary.get('console_errors', 0)}</td>"
+            f"<td class='{'fail' if fn_summary.get('failed_requests', 0) else 'ok'}'>{fn_summary.get('failed_requests', 0)}</td>"
+            "</tr>"
         )
 
     overview_tables = f"""
@@ -460,6 +743,19 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
     </thead>
     <tbody>
       {''.join(issue_rows)}
+    </tbody>
+  </table>
+  <h3>功能检测总览</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>页面</th><th>链接数</th><th>链接失败</th><th>链接通过率</th>
+        <th>按钮数</th><th>按钮失败</th><th>按钮通过率</th>
+        <th>Console 错误</th><th>失败请求 4xx/5xx</th>
+      </tr>
+    </thead>
+    <tbody>
+      {''.join(function_rows)}
     </tbody>
   </table>
 </section>
@@ -493,10 +789,16 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
 
         block_cards = []
         for block in block_results:
+            fig_sz = block.get("figma_size", {})
+            web_sz = block.get("web_size", {})
+            fig_dim = f"{fig_sz.get('width','?')}×{fig_sz.get('height','?')}"
+            web_dim = f"{web_sz.get('width','?')}×{web_sz.get('height','?')}"
+            layer = block.get("figma_layer_name", "") or "—"
             block_cards.append(
                 f"""
 <div class="block-card">
   <div class="block-title">{block['label']} · 相似度 {block['similarity']:.2f}%</div>
+  <div class="block-meta">Figma 图层: <code>{layer}</code> · Figma 尺寸: {fig_dim} · Web 尺寸: {web_dim}</div>
   <div class="img-grid block-grid">
     <div><div class="lbl">Figma</div><img src="{_img_src(block['figma_path'])}" /></div>
     <div><div class="lbl">Website</div><img src="{_img_src(block['web_path'])}" /></div>
@@ -505,6 +807,8 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
 </div>
 """
             )
+
+        function_section = _render_function_section_html(page.get("function_check") or {})
 
         cards.append(
             f"""
@@ -539,6 +843,7 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
       {''.join(diff_rows)}
     </tbody>
   </table>
+  {function_section}
 </section>
 """
         )
@@ -568,7 +873,18 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
     .img-grid .lbl{{font-size:12px;color:#6b7280;margin-bottom:6px;font-weight:700}}
     .img-grid img{{width:100%;border:1px solid #e5e7eb;border-radius:8px;background:#fff}}
     .block-card{{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:12px;margin:10px 0}}
-    .block-title{{font-weight:700;margin-bottom:10px}}
+    .block-title{{font-weight:700;margin-bottom:4px}}
+    .block-meta{{font-size:12px;color:#6b7280;margin-bottom:10px}}
+    .block-meta code{{background:#eef2ff;color:#4338ca;padding:1px 6px;border-radius:4px}}
+    td.ok,th.ok{{color:#047857;font-weight:600}}
+    td.fail,th.fail{{color:#b91c1c;font-weight:700;background:#fef2f2}}
+    td.warn,th.warn{{color:#b45309;font-weight:600;background:#fffbeb}}
+    td.muted,th.muted{{color:#6b7280}}
+    .empty{{color:#9ca3af;font-size:13px;padding:8px 0}}
+    .err-list{{margin:6px 0 0;padding-left:20px;font-size:13px}}
+    .err-list li{{margin:3px 0;word-break:break-all}}
+    .err-list code{{background:#f1f5f9;color:#0f172a;padding:1px 5px;border-radius:4px;margin-right:4px}}
+    h4{{margin:16px 0 8px;font-size:14px;color:#374151}}
     .block-grid{{grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:0}}
     table{{width:100%;border-collapse:collapse}}
     th,td{{border-bottom:1px solid #e5e7eb;padding:10px 8px;text-align:left;font-size:13px;vertical-align:top}}
@@ -641,6 +957,49 @@ def _render_markdown(pages: List[Dict[str, Any]], output_path: Path) -> Path:
             lines.append(f"- {suggestion}")
         lines.append("")
 
+        # Function check section
+        fn = page.get("function_check") or {}
+        summary = fn.get("summary", {}) if fn else {}
+        lines.append("Function check:")
+        if fn.get("error"):
+            lines.append(f"- error: {fn['error']}")
+        else:
+            lines.append(
+                f"- links: {summary.get('link_total', 0)} tested, "
+                f"{summary.get('link_failed', 0)} failed, "
+                f"pass rate {summary.get('link_pass_rate', 0):.1f}%"
+            )
+            lines.append(
+                f"- buttons: {summary.get('button_total', 0)} exercised, "
+                f"{summary.get('button_failed', 0)} failed, "
+                f"pass rate {summary.get('button_pass_rate', 0):.1f}%"
+            )
+            lines.append(
+                f"- console errors: {summary.get('console_errors', 0)}, "
+                f"page errors: {summary.get('page_errors', 0)}, "
+                f"failed requests: {summary.get('failed_requests', 0)}"
+            )
+            bad_links = [l for l in (fn.get("links") or []) if not l.get("ok")][:5]
+            if bad_links:
+                lines.append("- failing links:")
+                for l in bad_links:
+                    status = l.get("status") or "ERR"
+                    lines.append(
+                        f"  - `{(l.get('text') or '').strip()[:40]}` -> {l.get('href','')} "
+                        f"[{status}] {l.get('error','')}"
+                    )
+            bad_buttons = [
+                b for b in (fn.get("buttons") or [])
+                if b.get("status") in ("click_failed", "console_error", "not_found")
+            ][:5]
+            if bad_buttons:
+                lines.append("- failing buttons:")
+                for b in bad_buttons:
+                    lines.append(
+                        f"  - `{(b.get('text') or '').strip()[:40]}` [{b.get('status','')}] {b.get('error','')}"
+                    )
+        lines.append("")
+
     output_path.write_text("\n".join(lines), encoding="utf-8")
     return output_path
 
@@ -660,6 +1019,12 @@ def run() -> Dict[str, Any]:
     page_results: List[Dict[str, Any]] = []
     element_pages: List[Dict[str, Any]] = []
 
+    # Normalization scratch files (same-size copies used only for pixel diff)
+    # live in a temp dir so they never pollute reports/screenshots/.
+    norm_tmp = Path(tempfile.mkdtemp(prefix="focused_norm_"))
+
+    # We intentionally open WebCapture with a placeholder viewport; we reset it
+    # per-page below once we know each design's canvas width.
     with WebCapture(
         browser_type=Config.DEFAULT_BROWSER,
         headless=Config.HEADLESS,
@@ -672,19 +1037,39 @@ def run() -> Dict[str, Any]:
             diff_path = Config.REPORTS_DIR / "images" / f"focused_{key}_diff.png"
             compare_path = Config.REPORTS_DIR / "images" / f"focused_{key}_compare.png"
 
-            figma.save_node_to_file(page["figma_node"], figma_path, scale=2)
+            # 1) Pull the Figma node JSON FIRST so we know the design canvas size,
+            #    then align the browser viewport to the Figma frame width. This
+            #    makes 1 CSS px ≈ 1 Figma design px, so coordinates are directly
+            #    comparable and cropped blocks are already at the same scale.
             node_json = figma.get_node_json(page["figma_node"])
             ReportWriter._write_json(Config.REPORTS_DIR / "json" / f"focused_figma_{key}.json", node_json)
+            root_box = _node_box(node_json)
+            design_w = int(round(root_box[2])) if root_box else Config.AGENT_VIEWPORT_WIDTH
+            design_h = int(round(root_box[3])) if root_box else Config.AGENT_VIEWPORT_HEIGHT
+            # Cap viewport width so we do not launch absurd viewports on large designs.
+            viewport_w = max(360, min(design_w, 2560))
+            viewport_h = max(600, min(design_h, 2200))
 
-            capture.page.set_viewport_size({"width": Config.AGENT_VIEWPORT_WIDTH, "height": Config.AGENT_VIEWPORT_HEIGHT})
+            # 2) Export Figma at scale=1 so PNG pixels == design pixels.
+            figma.save_node_to_file(page["figma_node"], figma_path, scale=1)
+
+            # 3) Capture the site at the Figma-aligned viewport width.
+            capture.page.set_viewport_size({"width": viewport_w, "height": viewport_h})
             capture.page.goto(page["site_url"], wait_until="networkidle", timeout=30000)
             if Config.AGENT_HIDE_SELECTORS:
                 capture.hide_elements(Config.AGENT_HIDE_SELECTORS)
+            # Scroll to top so sticky/lazy elements render at their "initial" state,
+            # which is what the Figma design typically portrays.
+            capture.page.evaluate("window.scrollTo(0, 0)")
             capture.page.screenshot(path=str(web_path), full_page=True)
 
-            similarity = comparator.calculate_similarity(figma_path, web_path)
-            comparator.generate_diff_image(figma_path, web_path, diff_path)
-            comparator.generate_side_by_side(figma_path, web_path, compare_path, labels=("Figma", "Website"))
+            # 4) Full-page comparison -- normalize canvases so aspect ratios stay intact.
+            norm_fig_path = norm_tmp / f"focused_{key}_norm_figma.png"
+            norm_web_path = norm_tmp / f"focused_{key}_norm_web.png"
+            _normalize_pair_for_compare(figma_path, web_path, norm_fig_path, norm_web_path)
+            similarity = comparator.calculate_similarity(norm_fig_path, norm_web_path)
+            comparator.generate_diff_image(norm_fig_path, norm_web_path, diff_path)
+            comparator.generate_side_by_side(norm_fig_path, norm_web_path, compare_path, labels=("Figma", "Website"))
 
             page_results.append(
                 {
@@ -700,10 +1085,11 @@ def run() -> Dict[str, Any]:
                     "web_path": str(web_path),
                     "diff_path": str(diff_path),
                     "compare_path": str(compare_path),
+                    "viewport": {"width": viewport_w, "height": viewport_h},
+                    "figma_design": {"width": design_w, "height": design_h},
                     "status": "ok",
                 }
             )
-            root_box = _node_box(node_json)
             figma_block_abs_boxes: List[Tuple[float, float, float, float]] = []
             block_results = []
             for block in STABLE_BLOCKS:
@@ -711,24 +1097,68 @@ def run() -> Dict[str, Any]:
                 fig_block_path = Config.SCREENSHOTS_DIR / "figma" / f"focused_{key}_{bkey}.png"
                 web_block_path = Config.SCREENSHOTS_DIR / "web" / f"focused_{key}_{bkey}.png"
                 diff_block_path = Config.REPORTS_DIR / "images" / f"focused_{key}_{bkey}_diff.png"
+
+                # --- Figma side: crop the exact layer bbox when we can identify it.
                 node_for_block = _pick_figma_block_node(node_json, block)
+                abs_box: Optional[Tuple[float, float, float, float]] = None
+                figma_layer_name = ""
                 if node_for_block and root_box:
                     abs_box = _node_box(node_for_block)
+                    figma_layer_name = node_for_block.get("name", "")
                     _crop_from_figma_image(figma_path, root_box, abs_box, fig_block_path)
                     figma_block_abs_boxes.append(abs_box)
                 elif root_box:
                     abs_box = _ratio_to_abs_box(root_box, block["fallback_ratio"])
+                    figma_layer_name = "(ratio fallback)"
                     _crop_from_figma_image(figma_path, root_box, abs_box, fig_block_path)
                     figma_block_abs_boxes.append(abs_box)
                 else:
                     _crop_by_ratio_from_image(figma_path, block["fallback_ratio"], fig_block_path)
 
-                web_ok = _screenshot_web_block(capture.page, block["web_selectors"], web_block_path)
-                if not web_ok:
+                # --- Web side: prefer DOM-selector rect, but guard against
+                #     selectors that grab way more than the Figma block (e.g.
+                #     `main` returning the entire article area). When the
+                #     candidate is > 2.2x taller than the Figma block, fall
+                #     back to an exact coordinate crop based on the Figma
+                #     layer -- viewport width already matches the design, so
+                #     Figma page px ≈ web page px.
+                web_rect = _crop_web_block_from_full(
+                    capture.page, block["web_selectors"], web_path, web_block_path
+                )
+                if web_rect and abs_box:
+                    fig_h = abs_box[3]
+                    if fig_h > 0 and web_rect[3] > fig_h * 2.2:
+                        web_rect = None
+
+                if (not web_rect) and abs_box and root_box:
+                    try:
+                        web_img = Image.open(web_path)
+                        rx_off, ry_off = root_box[0], root_box[1]
+                        px = int(max(0, abs_box[0] - rx_off))
+                        py = int(max(0, abs_box[1] - ry_off))
+                        pw = int(abs_box[2])
+                        ph = int(abs_box[3])
+                        right = int(min(web_img.width, px + pw))
+                        bottom = int(min(web_img.height, py + ph))
+                        if right > px and bottom > py:
+                            web_block_path.parent.mkdir(parents=True, exist_ok=True)
+                            web_img.crop((px, py, right, bottom)).save(web_block_path)
+                            web_rect = (float(px), float(py), float(right - px), float(bottom - py))
+                    except Exception:
+                        pass
+
+                if not web_rect:
                     _crop_by_ratio_from_image(web_path, block["fallback_ratio"], web_block_path)
 
-                block_similarity = comparator.calculate_similarity(fig_block_path, web_block_path)
-                comparator.generate_diff_image(fig_block_path, web_block_path, diff_block_path)
+                # --- Normalize to the SAME canvas (aspect preserving) before pixel diff.
+                norm_fig_block = norm_tmp / f"focused_{key}_{bkey}_norm_figma.png"
+                norm_web_block = norm_tmp / f"focused_{key}_{bkey}_norm_web.png"
+                _normalize_pair_for_compare(fig_block_path, web_block_path, norm_fig_block, norm_web_block)
+                block_similarity = comparator.calculate_similarity(norm_fig_block, norm_web_block)
+                comparator.generate_diff_image(norm_fig_block, norm_web_block, diff_block_path)
+
+                fig_size = Image.open(fig_block_path).size
+                web_size = Image.open(web_block_path).size
                 block_results.append(
                     {
                         "key": bkey,
@@ -737,6 +1167,14 @@ def run() -> Dict[str, Any]:
                         "figma_path": str(fig_block_path),
                         "web_path": str(web_block_path),
                         "diff_path": str(diff_block_path),
+                        "figma_size": {"width": fig_size[0], "height": fig_size[1]},
+                        "web_size": {"width": web_size[0], "height": web_size[1]},
+                        "figma_layer_name": figma_layer_name,
+                        "web_rect": (
+                            {"x": web_rect[0], "y": web_rect[1], "w": web_rect[2], "h": web_rect[3]}
+                            if web_rect
+                            else None
+                        ),
                     }
                 )
 
@@ -779,6 +1217,29 @@ def run() -> Dict[str, Any]:
             }
             ReportWriter._write_json(Config.REPORTS_DIR / "json" / f"element_diff_{key}.json", element_payload)
             block_avg = round(sum(x["similarity"] for x in block_results) / len(block_results), 2) if block_results else 0.0
+
+            # --- Functional check: links + buttons + console/network anomalies.
+            function_check: Dict[str, Any] = {}
+            try:
+                checker = FunctionChecker(capture.page)
+                function_check = checker.run(check_buttons=True)
+                ReportWriter._write_json(
+                    Config.REPORTS_DIR / "json" / f"focused_function_{key}.json",
+                    {
+                        "version": version,
+                        "generated_at": datetime.now(UTC).isoformat(),
+                        "page_key": key,
+                        "page_label": page["label"],
+                        "site_url": page["site_url"],
+                        **function_check,
+                    },
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                function_check = {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "summary": {"link_total": 0, "link_failed": 0, "button_total": 0, "button_failed": 0},
+                }
+
             element_pages.append(
                 {
                     "key": key,
@@ -796,6 +1257,7 @@ def run() -> Dict[str, Any]:
                     "block_avg_similarity": block_avg,
                     "element": result,
                     "top_diffs": _top_diff_items(result),
+                    "function_check": function_check,
                 }
             )
 
@@ -809,6 +1271,9 @@ def run() -> Dict[str, Any]:
     ReportWriter._write_json(Config.REPORTS_DIR / "json" / "focused_element_diffs.json", {"pages": element_pages})
     html_path = _render_html(element_pages, Config.REPORTS_DIR / "focused_ui_report.html")
     md_path = _render_markdown(element_pages, Config.REPORTS_DIR / "focused_ui_summary.md")
+
+    # Drop the normalization scratch dir once the report is written.
+    shutil.rmtree(norm_tmp, ignore_errors=True)
 
     print(f"[OK] Focused report generated: {html_path}")
     print(f"[OK] Focused summary generated: {md_path}")
