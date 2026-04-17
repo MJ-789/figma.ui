@@ -188,6 +188,12 @@ class RunOrchestrator:
                 "height": Config.AGENT_VIEWPORT_HEIGHT,
             },
         ) as capture:
+            # Config.setup_directories() no longer creates these on-demand
+            # dirs, so make sure they exist before we write screenshots.
+            (Config.SCREENSHOTS_DIR / "figma").mkdir(parents=True, exist_ok=True)
+            (Config.SCREENSHOTS_DIR / "web").mkdir(parents=True, exist_ok=True)
+            (Config.REPORTS_DIR / "images").mkdir(parents=True, exist_ok=True)
+
             for item in items:
                 name_slug = self._slug(item["figma_name"])
                 figma_path = Config.SCREENSHOTS_DIR / "figma" / f"agent_{name_slug}.png"

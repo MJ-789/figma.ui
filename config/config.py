@@ -195,10 +195,15 @@ class Config:
 
     @classmethod
     def setup_directories(cls):
+        """确保必备输出目录存在。
+
+        focused_ui_check 现在把所有图片/报告打平放进
+        ``reports/focused_ui_report/``，不再使用 ``reports/images/``
+        和 ``reports/screenshots/figma|web``，所以这里只建共享的
+        JSON 目录和知识库目录，避免留下无用空文件夹。需要写截图的
+        脚本会在写入时按需 mkdir。
+        """
         for directory in [
-            cls.SCREENSHOTS_DIR / "figma",
-            cls.SCREENSHOTS_DIR / "web",
-            cls.REPORTS_DIR / "images",
             cls.REPORTS_DIR / "json",
             cls.KNOWLEDGE_DIR,
         ]:

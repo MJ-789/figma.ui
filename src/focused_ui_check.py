@@ -6,10 +6,12 @@ Runs a fixed set of pages:
 - Category (Pharmaceuticals)
 - Details (first Pharmaceuticals article)
 
-Outputs:
-- reports/json/focused_run_result.json
+Outputs (self-contained so the whole folder can be zipped and mailed):
+- reports/focused_ui_report/index.html
+- reports/focused_ui_report/summary.md
+- reports/focused_ui_report/*.png          (all screenshots live next to the html)
+- reports/json/focused_run_result.json     (machine-readable, stays separate)
 - reports/json/focused_element_diffs.json
-- reports/focused_ui_report.html
 """
 
 from __future__ import annotations
@@ -100,48 +102,52 @@ STABLE_BLOCKS = [
 _NOISE_NAME_RE = re.compile(r"^(image\s+\d+|frame\s*\d*|group\s*\d*)$", re.IGNORECASE)
 
 
+# Self-contained report folder. Every artifact the user needs to view the
+# report (HTML + screenshots + markdown) lives inside this one folder so
+# it can be zipped and e-mailed in a single step.
+FOCUSED_REPORT_DIR = Config.REPORTS_DIR / "focused_ui_report"
+
+
 def _img_src(path: str) -> str:
-    """Return a relative path from the reports/ directory so browsers can load
-    local images without triggering the file:/// cross-origin security block."""
+    """Return a filename-only reference so images load even when the whole
+    ``focused_ui_report/`` folder is sent/copied/zipped elsewhere."""
     p = Path(path)
     if not p.exists():
         return ""
+    # Everything under FOCUSED_REPORT_DIR is flat, so just the filename works.
     try:
-        return p.resolve().relative_to(Config.REPORTS_DIR.resolve()).as_posix()
+        return p.resolve().relative_to(FOCUSED_REPORT_DIR.resolve()).as_posix()
     except ValueError:
-        # Fallback: just use the filename if relative_to fails
         return p.name
 
 
 def _clean_output_dirs() -> None:
-    """Wipe all previous run artifacts so every run starts from a clean state.
+    """Wipe previous run artifacts so every run starts fresh.
 
-    Strategy: empty (not delete) every working output directory and remove
-    legacy/unused sibling directories so the reports/ tree stays minimal.
+    The focused report folder is nuked wholesale (HTML + every PNG inside),
+    and ``reports/json/`` is emptied. Legacy sibling directories left over
+    from earlier versions are also removed so ``reports/`` stays tidy.
     """
     Config.setup_directories()
 
-    # 1) Empty all working directories (keep the dirs themselves).
-    wipe_dirs = [
-        Config.REPORTS_DIR / "images",
-        Config.REPORTS_DIR / "json",
-        Config.SCREENSHOTS_DIR / "figma",
-        Config.SCREENSHOTS_DIR / "web",
-    ]
-    for d in wipe_dirs:
-        if not d.exists():
-            continue
-        for item in d.iterdir():
-            try:
-                if item.is_file() or item.is_symlink():
-                    item.unlink()
-                elif item.is_dir():
-                    shutil.rmtree(item, ignore_errors=True)
-            except PermissionError:
-                # File locked by another process (e.g. browser); skip.
-                pass
+    # 1) Fully recreate the self-contained report folder.
+    if FOCUSED_REPORT_DIR.exists():
+        shutil.rmtree(FOCUSED_REPORT_DIR, ignore_errors=True)
+    FOCUSED_REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 2) Remove legacy top-level report files from previous versions.
+    # 2) Empty reports/json/ (machine-readable outputs live here).
+    json_dir = Config.REPORTS_DIR / "json"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    for item in json_dir.iterdir():
+        try:
+            if item.is_file() or item.is_symlink():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+        except PermissionError:
+            pass
+
+    # 3) Drop legacy top-level report files from previous versions.
     legacy_files = [
         Config.REPORTS_DIR / "report.html",
         Config.REPORTS_DIR / "verification_summary.md",
@@ -155,13 +161,23 @@ def _clean_output_dirs() -> None:
             except PermissionError:
                 pass
 
-    # 3) Drop deprecated sibling directories that are no longer used.
+    # 4) Drop deprecated sibling directories. They used to hold screenshots
+    #    / diff images that are now bundled inside FOCUSED_REPORT_DIR.
     for legacy_dir in [
-        Config.REPORTS_DIR / "html",              # old pytest-html output
-        Config.SCREENSHOTS_DIR / "site",          # never populated
+        Config.REPORTS_DIR / "html",
+        Config.REPORTS_DIR / "images",
+        Config.SCREENSHOTS_DIR / "figma",
+        Config.SCREENSHOTS_DIR / "web",
+        Config.SCREENSHOTS_DIR / "site",
     ]:
         if legacy_dir.exists():
             shutil.rmtree(legacy_dir, ignore_errors=True)
+    # Remove the now-empty screenshots root if nothing else is using it.
+    try:
+        if Config.SCREENSHOTS_DIR.exists() and not any(Config.SCREENSHOTS_DIR.iterdir()):
+            Config.SCREENSHOTS_DIR.rmdir()
+    except OSError:
+        pass
 
 
 def _iter_nodes(root: Dict[str, Any], max_depth: int = -1) -> List[Tuple[int, Dict[str, Any]]]:
@@ -569,21 +585,117 @@ def _escape_html(value: Any) -> str:
     )
 
 
-def _render_function_section_html(fn: Dict[str, Any]) -> str:
-    """Render the per-page Functional check section (links + buttons + errors)."""
-    if not fn or fn.get("error"):
-        err = fn.get("error", "") if fn else ""
-        return (
-            "<h3>功能检测</h3>"
-            f"<div class='empty'>功能检测未生成{(': ' + _escape_html(err)) if err else ''}</div>"
-        )
-    summary = fn.get("summary", {})
-    links = fn.get("links", []) or []
-    buttons = fn.get("buttons", []) or []
-    console_errors = fn.get("console_errors", []) or []
-    page_errors = fn.get("page_errors", []) or []
-    failed_reqs = fn.get("failed_requests", []) or []
+def _aggregate_function_checks(pages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge per-page function check results into a single dedup'd view.
 
+    - Links are deduplicated by URL. Header/footer links that appear on every
+      page collapse into one row, with a "pages" column listing where they
+      were tested. Details-only links (e.g. related article in the sidebar)
+      naturally stay as their own rows.
+    - Buttons are NOT deduplicated (the same button text can mean different
+      things on different pages), but are rolled into one aggregated table
+      with a "page" column.
+    - Console errors / page errors / failed requests are gathered with the
+      page they originated from.
+    """
+    links_by_url: Dict[str, Dict[str, Any]] = {}
+    buttons: List[Dict[str, Any]] = []
+    console_errors: List[Dict[str, str]] = []
+    page_errors: List[Dict[str, str]] = []
+    failed_requests: List[Dict[str, Any]] = []
+    page_errors_by_page: List[Dict[str, Any]] = []
+
+    for p in pages:
+        fn = p.get("function_check") or {}
+        page_label = p.get("label", "")
+        if fn.get("error"):
+            page_errors_by_page.append({"page": page_label, "error": fn["error"]})
+            continue
+        for l in fn.get("links", []) or []:
+            href = l.get("href") or ""
+            if not href:
+                continue
+            existing = links_by_url.get(href)
+            if existing:
+                if page_label and page_label not in existing["pages"]:
+                    existing["pages"].append(page_label)
+                # If any page saw this link as failed, persist the failure.
+                if not l.get("ok") and existing.get("ok"):
+                    existing["ok"] = False
+                    existing["status"] = l.get("status", existing.get("status"))
+                    existing["error"] = l.get("error", existing.get("error", ""))
+            else:
+                links_by_url[href] = {
+                    "href": href,
+                    "text": (l.get("text") or "").strip(),
+                    "status": l.get("status"),
+                    "ok": l.get("ok", True),
+                    "elapsed_ms": l.get("elapsed_ms", 0),
+                    "error": l.get("error", ""),
+                    "pages": [page_label] if page_label else [],
+                }
+        for b in fn.get("buttons", []) or []:
+            buttons.append({**b, "page": page_label})
+        for e in fn.get("console_errors", []) or []:
+            console_errors.append({"page": page_label, "message": e})
+        for e in fn.get("page_errors", []) or []:
+            page_errors.append({"page": page_label, "message": e})
+        for r in fn.get("failed_requests", []) or []:
+            failed_requests.append({"page": page_label, **r})
+
+    # Sort: failed first, then by URL.
+    links = sorted(
+        links_by_url.values(),
+        key=lambda x: (0 if not x.get("ok") else 1, x.get("href", "")),
+    )
+
+    button_failed_statuses = {"click_failed", "console_error", "not_found"}
+    buttons_failed = sum(1 for b in buttons if b.get("status") in button_failed_statuses)
+    links_failed = sum(1 for l in links if not l.get("ok"))
+
+    return {
+        "links": links,
+        "buttons": buttons,
+        "console_errors": console_errors,
+        "page_errors": page_errors,
+        "failed_requests": failed_requests,
+        "page_errors_by_page": page_errors_by_page,
+        "summary": {
+            "unique_links": len(links),
+            "unique_links_failed": links_failed,
+            "link_pass_rate": (1 - links_failed / len(links)) * 100 if links else 0.0,
+            "buttons_tested": len(buttons),
+            "buttons_failed": buttons_failed,
+            "button_pass_rate": (1 - buttons_failed / len(buttons)) * 100 if buttons else 0.0,
+            "console_errors": len(console_errors),
+            "page_errors": len(page_errors),
+            "failed_requests": len(failed_requests),
+        },
+    }
+
+
+_BUTTON_STATUS_CLASS = {
+    "ok": "ok",
+    "navigated": "warn",
+    "skipped": "muted",
+    "enumerated": "muted",
+    "console_error": "fail",
+    "click_failed": "fail",
+    "not_found": "fail",
+}
+
+
+def _render_function_global_html(agg: Dict[str, Any]) -> str:
+    """Render the single consolidated function check module for the whole run."""
+    summary = agg.get("summary", {})
+    links = agg.get("links", []) or []
+    buttons = agg.get("buttons", []) or []
+    console_errors = agg.get("console_errors", []) or []
+    page_errors = agg.get("page_errors", []) or []
+    failed_reqs = agg.get("failed_requests", []) or []
+    page_errors_by_page = agg.get("page_errors_by_page", []) or []
+
+    # Link rows (deduped by URL).
     link_rows = []
     for l in links:
         ok = l.get("ok")
@@ -591,10 +703,13 @@ def _render_function_section_html(fn: Dict[str, Any]) -> str:
         status_cell = f"{status}" if status is not None else "—"
         cls = "ok" if ok else "fail"
         text = _escape_html((l.get("text") or "").strip() or "(无文案)")
-        href = _escape_html(l.get("href", ""))
+        href_raw = l.get("href", "")
+        href = _escape_html(href_raw)
         err = _escape_html(l.get("error", ""))
+        pages = ", ".join(l.get("pages", []) or [])
         link_rows.append(
             "<tr>"
+            f"<td>{_escape_html(pages) or '—'}</td>"
             f"<td>{text}</td>"
             f"<td><a href='{href}' target='_blank' rel='noopener'>{href}</a></td>"
             f"<td class='{cls}'>{status_cell}</td>"
@@ -604,76 +719,101 @@ def _render_function_section_html(fn: Dict[str, Any]) -> str:
             "</tr>"
         )
     if not link_rows:
-        link_rows.append("<tr><td colspan='6' class='empty'>未发现可见链接</td></tr>")
+        link_rows.append("<tr><td colspan='7' class='empty'>未发现可见链接</td></tr>")
 
+    # Button rows (with page column).
     button_rows = []
     for b in buttons:
         status = b.get("status", "")
-        cls = {
-            "ok": "ok",
-            "navigated": "warn",
-            "skipped": "muted",
-            "enumerated": "muted",
-            "console_error": "fail",
-            "click_failed": "fail",
-            "not_found": "fail",
-        }.get(status, "muted")
+        cls = _BUTTON_STATUS_CLASS.get(status, "muted")
         text = _escape_html((b.get("text") or "").strip() or "(无文案)")
         extra = b.get("navigated_to") or b.get("error") or b.get("reason") or ""
         button_rows.append(
             "<tr>"
+            f"<td>{_escape_html(b.get('page', ''))}</td>"
             f"<td>{text}</td>"
             f"<td class='{cls}'>{_escape_html(status)}</td>"
             f"<td>{_escape_html(extra)}</td>"
             "</tr>"
         )
     if not button_rows:
-        button_rows.append("<tr><td colspan='3' class='empty'>未发现可见按钮</td></tr>")
+        button_rows.append("<tr><td colspan='4' class='empty'>未发现可见按钮</td></tr>")
 
+    # Anomaly list (grouped & capped).
     err_items = []
-    for item in console_errors[:10]:
-        err_items.append(f"<li><code>console</code> {_escape_html(item)}</li>")
-    for item in page_errors[:10]:
-        err_items.append(f"<li><code>pageerror</code> {_escape_html(item)}</li>")
-    for item in failed_reqs[:10]:
+    for item in console_errors[:12]:
+        err_items.append(
+            f"<li><code>console</code> [{_escape_html(item.get('page',''))}] "
+            f"{_escape_html(item.get('message',''))}</li>"
+        )
+    for item in page_errors[:12]:
+        err_items.append(
+            f"<li><code>pageerror</code> [{_escape_html(item.get('page',''))}] "
+            f"{_escape_html(item.get('message',''))}</li>"
+        )
+    for item in failed_reqs[:12]:
         err_items.append(
             f"<li><code>{item.get('status','?')}</code> "
             f"<code>{_escape_html(item.get('method','GET'))}</code> "
+            f"[{_escape_html(item.get('page',''))}] "
             f"{_escape_html(item.get('url',''))}</li>"
         )
-    errors_html = f"<ul class='err-list'>{''.join(err_items)}</ul>" if err_items else "<div class='empty'>无异常记录</div>"
+    for item in page_errors_by_page:
+        err_items.append(
+            f"<li><code>checker-error</code> [{_escape_html(item.get('page',''))}] "
+            f"{_escape_html(item.get('error',''))}</li>"
+        )
+    errors_html = (
+        f"<ul class='err-list'>{''.join(err_items)}</ul>"
+        if err_items
+        else "<div class='empty'>无异常记录</div>"
+    )
+
+    link_rate = f"{summary.get('link_pass_rate', 0):.1f}%" if summary.get("unique_links") else "—"
+    btn_rate = f"{summary.get('button_pass_rate', 0):.1f}%" if summary.get("buttons_tested") else "—"
 
     return f"""
-<h3>功能检测</h3>
-<div class="stats">
-  <div><b>链接 · 通过</b><span>{summary.get('link_total', 0) - summary.get('link_failed', 0)} / {summary.get('link_total', 0)}</span></div>
-  <div><b>按钮 · 通过</b><span>{summary.get('button_total', 0) - summary.get('button_failed', 0)} / {summary.get('button_total', 0)}</span></div>
-  <div><b>Console 错误</b><span>{summary.get('console_errors', 0)}</span></div>
-  <div><b>4xx/5xx 请求</b><span>{summary.get('failed_requests', 0)}</span></div>
-</div>
-<h4>链接跳转验证</h4>
-<table>
-  <thead><tr><th>文案</th><th>URL</th><th>状态码</th><th>耗时</th><th>结果</th><th>备注</th></tr></thead>
-  <tbody>{''.join(link_rows)}</tbody>
-</table>
-<h4>按钮点击结果</h4>
-<table>
-  <thead><tr><th>按钮文案</th><th>状态</th><th>详情</th></tr></thead>
-  <tbody>{''.join(button_rows)}</tbody>
-</table>
-<h4>异常记录（Console / PageError / 失败请求）</h4>
-{errors_html}
+<section class="card">
+  <h2>功能检测（全局 · 已去重）</h2>
+  <p class="hint">链接按 URL 去重：同一条 Header/Footer 链接在多页都出现时，只保留一行，并在"出现页"列中标记来源页面。</p>
+  <div class="stats">
+    <div><b>唯一链接</b><span>{summary.get('unique_links', 0)}</span></div>
+    <div><b>链接失败 / 通过率</b><span>{summary.get('unique_links_failed', 0)} · {link_rate}</span></div>
+    <div><b>按钮点击次数</b><span>{summary.get('buttons_tested', 0)}</span></div>
+    <div><b>按钮失败 / 通过率</b><span>{summary.get('buttons_failed', 0)} · {btn_rate}</span></div>
+    <div><b>Console 错误</b><span>{summary.get('console_errors', 0)}</span></div>
+    <div><b>Page 错误</b><span>{summary.get('page_errors', 0)}</span></div>
+    <div><b>4xx/5xx 请求</b><span>{summary.get('failed_requests', 0)}</span></div>
+  </div>
+  <h3>链接跳转验证（去重）</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>出现页</th><th>文案</th><th>URL</th><th>状态码</th><th>耗时</th><th>结果</th><th>备注</th>
+      </tr>
+    </thead>
+    <tbody>{''.join(link_rows)}</tbody>
+  </table>
+  <h3>按钮点击结果（按页面）</h3>
+  <table>
+    <thead>
+      <tr><th>页面</th><th>按钮文案</th><th>状态</th><th>详情</th></tr>
+    </thead>
+    <tbody>{''.join(button_rows)}</tbody>
+  </table>
+  <h3>异常记录（Console / PageError / 4xx-5xx 请求）</h3>
+  {errors_html}
+</section>
 """
 
 
-def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
+def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], output_path: Path) -> Path:
     page_rows = []
     issue_keys = ["text_color", "fill_color", "font_family", "font_size", "font_weight", "line_height", "border_radius", "width", "height", "unmatched"]
     issue_header = "".join(f"<th>{k}</th>" for k in issue_keys)
     issue_rows = []
     block_header = "".join(f"<th>{b['label']}</th>" for b in STABLE_BLOCKS)
     block_rows = []
-    function_rows = []
     for page in pages:
         elem = page["element"]
         issue_count = _issue_counts(page["top_diffs"])
@@ -693,26 +833,6 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
             f"<td>{page['label']}</td>"
             + "".join(f"<td>{block_map.get(b['key'], 0.0):.2f}%</td>" for b in STABLE_BLOCKS)
             + "</tr>"
-        )
-        fn_summary = (page.get("function_check") or {}).get("summary", {})
-        link_total = fn_summary.get("link_total", 0)
-        link_failed = fn_summary.get("link_failed", 0)
-        btn_total = fn_summary.get("button_total", 0)
-        btn_failed = fn_summary.get("button_failed", 0)
-        link_rate_str = f"{fn_summary.get('link_pass_rate', 0):.1f}%" if link_total else "—"
-        btn_rate_str = f"{fn_summary.get('button_pass_rate', 0):.1f}%" if btn_total else "—"
-        function_rows.append(
-            "<tr>"
-            f"<td>{page['label']}</td>"
-            f"<td>{link_total}</td>"
-            f"<td class='{'fail' if link_failed else ('ok' if link_total else 'muted')}'>{link_failed}</td>"
-            f"<td>{link_rate_str}</td>"
-            f"<td>{btn_total}</td>"
-            f"<td class='{'fail' if btn_failed else ('ok' if btn_total else 'muted')}'>{btn_failed}</td>"
-            f"<td>{btn_rate_str}</td>"
-            f"<td class='{'fail' if fn_summary.get('console_errors', 0) else 'ok'}'>{fn_summary.get('console_errors', 0)}</td>"
-            f"<td class='{'fail' if fn_summary.get('failed_requests', 0) else 'ok'}'>{fn_summary.get('failed_requests', 0)}</td>"
-            "</tr>"
         )
 
     overview_tables = f"""
@@ -745,21 +865,10 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
       {''.join(issue_rows)}
     </tbody>
   </table>
-  <h3>功能检测总览</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>页面</th><th>链接数</th><th>链接失败</th><th>链接通过率</th>
-        <th>按钮数</th><th>按钮失败</th><th>按钮通过率</th>
-        <th>Console 错误</th><th>失败请求 4xx/5xx</th>
-      </tr>
-    </thead>
-    <tbody>
-      {''.join(function_rows)}
-    </tbody>
-  </table>
 </section>
 """
+
+    function_section_html = _render_function_global_html(function_agg)
 
     cards = []
     for page in pages:
@@ -808,8 +917,6 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
 """
             )
 
-        function_section = _render_function_section_html(page.get("function_check") or {})
-
         cards.append(
             f"""
 <section class="card">
@@ -843,7 +950,6 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
       {''.join(diff_rows)}
     </tbody>
   </table>
-  {function_section}
 </section>
 """
         )
@@ -885,6 +991,7 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
     .err-list li{{margin:3px 0;word-break:break-all}}
     .err-list code{{background:#f1f5f9;color:#0f172a;padding:1px 5px;border-radius:4px;margin-right:4px}}
     h4{{margin:16px 0 8px;font-size:14px;color:#374151}}
+    p.hint{{color:#6b7280;font-size:13px;margin:0 0 14px}}
     .block-grid{{grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:0}}
     table{{width:100%;border-collapse:collapse}}
     th,td{{border-bottom:1px solid #e5e7eb;padding:10px 8px;text-align:left;font-size:13px;vertical-align:top}}
@@ -902,6 +1009,7 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
   </header>
   <div class="wrap">
     {overview_tables}
+    {function_section_html}
     {''.join(cards)}
   </div>
 </body>
@@ -910,7 +1018,7 @@ def _render_html(pages: List[Dict[str, Any]], output_path: Path) -> Path:
     return output_path
 
 
-def _render_markdown(pages: List[Dict[str, Any]], output_path: Path) -> Path:
+def _render_markdown(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], output_path: Path) -> Path:
     lines = [
         "# Focused UI Summary",
         "",
@@ -957,48 +1065,49 @@ def _render_markdown(pages: List[Dict[str, Any]], output_path: Path) -> Path:
             lines.append(f"- {suggestion}")
         lines.append("")
 
-        # Function check section
-        fn = page.get("function_check") or {}
-        summary = fn.get("summary", {}) if fn else {}
-        lines.append("Function check:")
-        if fn.get("error"):
-            lines.append(f"- error: {fn['error']}")
-        else:
-            lines.append(
-                f"- links: {summary.get('link_total', 0)} tested, "
-                f"{summary.get('link_failed', 0)} failed, "
-                f"pass rate {summary.get('link_pass_rate', 0):.1f}%"
-            )
-            lines.append(
-                f"- buttons: {summary.get('button_total', 0)} exercised, "
-                f"{summary.get('button_failed', 0)} failed, "
-                f"pass rate {summary.get('button_pass_rate', 0):.1f}%"
-            )
-            lines.append(
-                f"- console errors: {summary.get('console_errors', 0)}, "
-                f"page errors: {summary.get('page_errors', 0)}, "
-                f"failed requests: {summary.get('failed_requests', 0)}"
-            )
-            bad_links = [l for l in (fn.get("links") or []) if not l.get("ok")][:5]
-            if bad_links:
-                lines.append("- failing links:")
-                for l in bad_links:
-                    status = l.get("status") or "ERR"
-                    lines.append(
-                        f"  - `{(l.get('text') or '').strip()[:40]}` -> {l.get('href','')} "
-                        f"[{status}] {l.get('error','')}"
-                    )
-            bad_buttons = [
-                b for b in (fn.get("buttons") or [])
-                if b.get("status") in ("click_failed", "console_error", "not_found")
-            ][:5]
-            if bad_buttons:
-                lines.append("- failing buttons:")
-                for b in bad_buttons:
-                    lines.append(
-                        f"  - `{(b.get('text') or '').strip()[:40]}` [{b.get('status','')}] {b.get('error','')}"
-                    )
+    # Single consolidated function-check module, deduplicated by URL.
+    summary = function_agg.get("summary", {}) if function_agg else {}
+    lines.append("## Function check (global, deduped)")
+    lines.append("")
+    lines.append(
+        f"- Unique links: {summary.get('unique_links', 0)}, "
+        f"failed: {summary.get('unique_links_failed', 0)}, "
+        f"pass rate: {summary.get('link_pass_rate', 0):.1f}%"
+    )
+    lines.append(
+        f"- Buttons clicked: {summary.get('buttons_tested', 0)}, "
+        f"failed: {summary.get('buttons_failed', 0)}, "
+        f"pass rate: {summary.get('button_pass_rate', 0):.1f}%"
+    )
+    lines.append(
+        f"- Console errors: {summary.get('console_errors', 0)}, "
+        f"page errors: {summary.get('page_errors', 0)}, "
+        f"failed requests: {summary.get('failed_requests', 0)}"
+    )
+    bad_links = [l for l in (function_agg.get("links") or []) if not l.get("ok")][:10]
+    if bad_links:
         lines.append("")
+        lines.append("Failing links:")
+        for l in bad_links:
+            status = l.get("status") or "ERR"
+            pages_s = ", ".join(l.get("pages", []) or [])
+            lines.append(
+                f"- [{pages_s}] `{(l.get('text') or '').strip()[:40]}` -> {l.get('href','')} "
+                f"[{status}] {l.get('error','')}"
+            )
+    bad_buttons = [
+        b for b in (function_agg.get("buttons") or [])
+        if b.get("status") in ("click_failed", "console_error", "not_found")
+    ][:10]
+    if bad_buttons:
+        lines.append("")
+        lines.append("Failing buttons:")
+        for b in bad_buttons:
+            lines.append(
+                f"- [{b.get('page','')}] `{(b.get('text') or '').strip()[:40]}` "
+                f"[{b.get('status','')}] {b.get('error','')}"
+            )
+    lines.append("")
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
     return output_path
@@ -1007,7 +1116,6 @@ def _render_markdown(pages: List[Dict[str, Any]], output_path: Path) -> Path:
 def run() -> Dict[str, Any]:
     _clean_output_dirs()
 
-    Config.setup_directories()
     version = (Config.BASE_DIR / "VERSION").read_text(encoding="utf-8").strip()
     figma = FigmaClient()
     comparator = ImageCompare(threshold=Config.SIMILARITY_THRESHOLD)
@@ -1032,10 +1140,13 @@ def run() -> Dict[str, Any]:
     ) as capture:
         for page in FOCUSED_PAGES:
             key = page["key"]
-            figma_path = Config.SCREENSHOTS_DIR / "figma" / f"focused_{key}.png"
-            web_path = Config.SCREENSHOTS_DIR / "web" / f"focused_{key}.png"
-            diff_path = Config.REPORTS_DIR / "images" / f"focused_{key}_diff.png"
-            compare_path = Config.REPORTS_DIR / "images" / f"focused_{key}_compare.png"
+            # Every image for this run lives flat inside the self-contained
+            # report folder, so shipping the folder gives the reader a
+            # fully-working HTML report with all screenshots attached.
+            figma_path = FOCUSED_REPORT_DIR / f"{key}_full_figma.png"
+            web_path = FOCUSED_REPORT_DIR / f"{key}_full_web.png"
+            diff_path = FOCUSED_REPORT_DIR / f"{key}_full_diff.png"
+            compare_path = FOCUSED_REPORT_DIR / f"{key}_full_compare.png"
 
             # 1) Pull the Figma node JSON FIRST so we know the design canvas size,
             #    then align the browser viewport to the Figma frame width. This
@@ -1094,9 +1205,9 @@ def run() -> Dict[str, Any]:
             block_results = []
             for block in STABLE_BLOCKS:
                 bkey = block["key"]
-                fig_block_path = Config.SCREENSHOTS_DIR / "figma" / f"focused_{key}_{bkey}.png"
-                web_block_path = Config.SCREENSHOTS_DIR / "web" / f"focused_{key}_{bkey}.png"
-                diff_block_path = Config.REPORTS_DIR / "images" / f"focused_{key}_{bkey}_diff.png"
+                fig_block_path = FOCUSED_REPORT_DIR / f"{key}_{bkey}_figma.png"
+                web_block_path = FOCUSED_REPORT_DIR / f"{key}_{bkey}_web.png"
+                diff_block_path = FOCUSED_REPORT_DIR / f"{key}_{bkey}_diff.png"
 
                 # --- Figma side: crop the exact layer bbox when we can identify it.
                 node_for_block = _pick_figma_block_node(node_json, block)
@@ -1219,9 +1330,20 @@ def run() -> Dict[str, Any]:
             block_avg = round(sum(x["similarity"] for x in block_results) / len(block_results), 2) if block_results else 0.0
 
             # --- Functional check: links + buttons + console/network anomalies.
+            # Details pages mostly re-expose the same header/footer/related
+            # links found on Home + Category. We keep the per-page cap small
+            # so only its genuinely unique links show up after global dedup.
+            if key == "details":
+                max_links_here, max_buttons_here = 8, 6
+            else:
+                max_links_here, max_buttons_here = 25, 12
             function_check: Dict[str, Any] = {}
             try:
-                checker = FunctionChecker(capture.page)
+                checker = FunctionChecker(
+                    capture.page,
+                    max_links=max_links_here,
+                    max_buttons=max_buttons_here,
+                )
                 function_check = checker.run(check_buttons=True)
                 ReportWriter._write_json(
                     Config.REPORTS_DIR / "json" / f"focused_function_{key}.json",
@@ -1261,27 +1383,41 @@ def run() -> Dict[str, Any]:
                 }
             )
 
+    # Deduplicate link results across pages so the report stops repeating
+    # the same Header/Footer nav links once per page.
+    function_agg = _aggregate_function_checks(element_pages)
+
     focused_run = {
         "version": version,
         "generated_at": datetime.now(UTC).isoformat(),
         "base_url": Config.BASE_URL,
         "page_results": page_results,
+        "function_check_global": function_agg,
     }
     ReportWriter._write_json(Config.REPORTS_DIR / "json" / "focused_run_result.json", focused_run)
     ReportWriter._write_json(Config.REPORTS_DIR / "json" / "focused_element_diffs.json", {"pages": element_pages})
-    html_path = _render_html(element_pages, Config.REPORTS_DIR / "focused_ui_report.html")
-    md_path = _render_markdown(element_pages, Config.REPORTS_DIR / "focused_ui_summary.md")
+    ReportWriter._write_json(
+        Config.REPORTS_DIR / "json" / "focused_function_global.json", function_agg
+    )
+
+    # Write HTML + Markdown INSIDE the self-contained folder so it can be
+    # zipped / mailed in one shot (every <img> points to a sibling file).
+    html_path = _render_html(element_pages, function_agg, FOCUSED_REPORT_DIR / "index.html")
+    md_path = _render_markdown(element_pages, function_agg, FOCUSED_REPORT_DIR / "summary.md")
 
     # Drop the normalization scratch dir once the report is written.
     shutil.rmtree(norm_tmp, ignore_errors=True)
 
     print(f"[OK] Focused report generated: {html_path}")
+    print(f"[OK] Folder (zip & send this): {FOCUSED_REPORT_DIR}")
     print(f"[OK] Focused summary generated: {md_path}")
     return {
         "focused_run": focused_run,
         "element_pages": element_pages,
+        "function_check_global": function_agg,
         "html_report": str(html_path),
         "markdown_summary": str(md_path),
+        "report_folder": str(FOCUSED_REPORT_DIR),
     }
 
 
