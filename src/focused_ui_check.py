@@ -111,6 +111,7 @@ def _load_focused_pages() -> List[Dict[str, Any]]:
         sys.exit(1)
 
     env_file_key = (Config.FIGMA_FILE_KEY or "").strip() or None
+    env_default_node = (Config.FIGMA_TARGET_NODE_ID or "").strip().replace("-", ":")
 
     pages: List[Dict[str, Any]] = []
     for idx, p in enumerate(pages_raw):
@@ -130,10 +131,14 @@ def _load_focused_pages() -> List[Dict[str, Any]]:
             figma_node = info.node_id
             file_key = info.file_key
         else:
+            # 允许最短配置: 不写 figma_node / figma_url 时, 回退到 .env 的
+            # FIGMA_TARGET_NODE_ID 作为默认节点, 便于先批量跑站点页面验证.
+            if not figma_node:
+                figma_node = env_default_node
             if not figma_node:
                 print(
                     f"[ERROR] 第 {idx+1} 条既没有 figma_url 也没有 figma_node, "
-                    f"至少要填一个."
+                    f"且 .env 未提供 FIGMA_TARGET_NODE_ID 默认值."
                 )
                 sys.exit(1)
             file_key = env_file_key

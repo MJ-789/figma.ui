@@ -1,23 +1,35 @@
 {
-  "_description": "focused_ui_check 要对比的页面清单。短格式最省事: 只填 figma_node + site_path, file_key 和 host 自动从 .env 取。换 .env 立即生效, 不用改本文件。如需跨 Figma 文件对比, 某一条可改用完整的 figma_url/site_url 覆盖默认。",
+  "_description": "功能验证链接清单（EN/NL）。统一按 Home 样式基线验证；key 使用 home_* 系列避免报告文件名冲突。",
   "pages": [
     {
-      "key": "home",
-      "label": "Home",
-      "figma_node": "15480:75",
+      "key": "home_en",
+      "label": "Home (EN)",
       "site_path": "/"
     },
     {
-      "key": "category",
-      "label": "Category",
-      "figma_node": "15480:1305",
-      "site_path": "/list/Pharmaceuticals"
+      "key": "home_nl",
+      "label": "Home (NL)",
+      "site_path": "/nl"
     },
     {
-      "key": "details",
-      "label": "Details",
-      "figma_node": "15497:1924",
-      "site_path": "/anti-allergy-medications-scientific-overview-of-types-mechanisms-medical-context"
+      "key": "home_games_en",
+      "label": "Home Style - Games (EN)",
+      "site_path": "/games/trial-bike"
+    },
+    {
+      "key": "home_games_nl",
+      "label": "Home Style - Games (NL)",
+      "site_path": "/nl/games/trial-bike"
+    },
+    {
+      "key": "home_tricks_en",
+      "label": "Home Style - Tricks (EN)",
+      "site_path": "/tricks"
+    },
+    {
+      "key": "home_tricks_nl",
+      "label": "Home Style - Tricks (NL)",
+      "site_path": "/nl/tricks"
     }
   ]
 }
