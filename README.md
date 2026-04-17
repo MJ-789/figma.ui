@@ -37,24 +37,36 @@ python run_agent.py --dry
 # 强制重新拉取网站/Figma数据
 python run_agent.py --fresh
 
-# 3 页专项稳定结构块 + 元素级差异报告
+# 聚焦模板对比（自动检测已配置模板）
 python -m src.focused_ui_check
+
+# 只跑游戏模板
+python -m src.focused_ui_check --template games
+
+# 只跑资讯模板
+python -m src.focused_ui_check --template news
 ```
 
-## 3 页专项对比说明
+## 聚焦模板对比说明
 
-`src.focused_ui_check` 固定对比以下页面：
+`src.focused_ui_check` 读取 `config/focused_pages.json`，支持两套模板：
 
-- Home: `https://newsdrafte.com/`
-- Category: `https://newsdrafte.com/list/Pharmaceuticals`
-- Details: `https://newsdrafte.com/anti-allergy-medications-scientific-overview-of-types-mechanisms-medical-context`
+- `games`: 游戏首页/分类/详情
+- `news`: 资讯列表/详情
 
-输出报告：
+启用规则（最简）：
 
-- 可视化 HTML：`reports/focused_ui_report.html`
-- 可读摘要：`reports/focused_ui_summary.md`
-- 页面与块级 JSON：`reports/json/focused_run_result.json`
-- 元素差异 JSON：`reports/json/focused_element_diffs.json`
+- 在模板下填写 `figma_node` => 该模板会运行
+- `figma_node` 为空 => 自动跳过该模板
+- 两个模板都填写 => 同时运行两套，分别输出报告
+
+输出目录：
+
+- 游戏 HTML：`reports/focused_ui_report_games/index.html`
+- 游戏摘要：`reports/focused_ui_report_games/summary.md`
+- 资讯 HTML：`reports/focused_ui_report_news/index.html`
+- 资讯摘要：`reports/focused_ui_report_news/summary.md`
+- 模板 JSON：`reports/json/focused_games_*.json`, `reports/json/focused_news_*.json`
 - Figma 节点原始 JSON：`reports/json/focused_figma_*.json`
 
 ## 报告怎么给开发用
@@ -82,13 +94,14 @@ python -m src.focused_ui_check
 
 - `run_agent.py`: 自动测试代理入口
 - `config/config.py`: 全局配置中心
+- `config/focused_pages.json`: 聚焦模板配置（games/news）
 - `src/run_orchestrator.py`: 发现→索引→配对→计划→执行→报告
 - `src/page_crawler.py`: 网站页面发现
 - `src/figma_page_indexer.py`: Figma 页面索引
 - `src/page_matcher.py`: 页面自动配对
 - `src/image_compare.py`: 截图相似度与差异图
 - `src/element_compare.py`: 元素属性级对比
-- `src/focused_ui_check.py`: 3 页专项稳定结构块报告
+- `src/focused_ui_check.py`: 聚焦模板（games/news）稳定结构块 + 元素级报告
 - `reports/`: 运行产出（JSON / HTML / 图片）
 
 ## 注意事项

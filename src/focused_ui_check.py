@@ -64,7 +64,11 @@ except ImportError:  # pragma: no cover
 #        "site_url": "https://host.com/" }
 #      → node_id / file_key 从 figma_url 解析.
 #
+# 默认配置路径（不带 --template 参数时使用）
 FOCUSED_PAGES_CONFIG = Config.BASE_DIR / "config" / "focused_pages.json"
+
+# 默认报告目录（不带 --template 参数时使用）
+# 带模板名时会动态变为 focused_ui_report_{template}/
 
 
 def _join_site_url(site_path: str) -> str:
@@ -88,35 +92,53 @@ def _build_figma_url(file_key: Optional[str], node_id: str) -> str:
     return f"https://www.figma.com/design/{file_key}/Slug?node-id={node_param}"
 
 
-def _load_focused_pages() -> List[Dict[str, Any]]:
-    """从 JSON 读取页面清单, 短字段自动拼接 .env 里的 host / file_key.
+def _load_focused_pages(
+    config_path: Optional[Path] = None,
+    template_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """从 focused_pages.json 读取页面清单。
 
-    校验失败时打印清晰错误并退出程序, 避免下游拿到空配置.
+    支持两种格式：
+
+    ① 新模板格式（推荐）—— figma_node 填写即启用，留空自动跳过：
+        {
+          "games": { "figma_node": "16000:13788", "pages": [{"key":…, "label":…, "path":…}] },
+          "news":  { "figma_node": "",             "pages": […] }
+        }
+
+    ② 旧平铺格式（兼容）—— 逐条指定完整字段：
+        { "pages": [ {"key":…, "figma_node":…, "site_path":…} ] }
+
+    Args:
+        config_path:     配置文件路径，默认使用 FOCUSED_PAGES_CONFIG。
+        template_filter: 仅加载指定模板（新格式专用）。None = 加载全部已启用模板。
     """
-    if not FOCUSED_PAGES_CONFIG.exists():
-        print(
-            f"[ERROR] 未找到页面配置文件: {FOCUSED_PAGES_CONFIG}\n"
-            f"        需要填入 pages 列表."
-        )
+    cfg = config_path or FOCUSED_PAGES_CONFIG
+    if not cfg.exists():
+        print(f"[ERROR] 配置文件不存在: {cfg}")
         sys.exit(1)
-
     try:
-        raw = json.loads(FOCUSED_PAGES_CONFIG.read_text(encoding="utf-8"))
+        raw = json.loads(cfg.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        print(f"[ERROR] focused_pages.json 解析失败: {e}")
+        print(f"[ERROR] {cfg.name} JSON 解析失败: {e}")
         sys.exit(1)
 
+    # ── 新模板格式检测 ────────────────────────────────────────────────
+    known_templates = [k for k in ("games", "news") if k in raw]
+    if known_templates:
+        return _load_template_format(raw, known_templates, template_filter)
+
+    # ── 旧平铺格式兼容 ────────────────────────────────────────────────
     pages_raw = raw.get("pages") or []
     if not pages_raw:
-        print(f"[ERROR] focused_pages.json 的 pages 列表为空")
+        print(f"[ERROR] {cfg.name} 的 pages 列表为空")
         sys.exit(1)
 
     env_file_key = (Config.FIGMA_FILE_KEY or "").strip() or None
     env_default_node = (Config.FIGMA_TARGET_NODE_ID or "").strip().replace("-", ":")
-
     pages: List[Dict[str, Any]] = []
+
     for idx, p in enumerate(pages_raw):
-        # ── 1) Figma 节点 ─────────────────────────
         figma_url = (p.get("figma_url") or "").strip()
         figma_node = (p.get("figma_node") or "").strip().replace("-", ":")
         file_key: Optional[str] = None
@@ -124,67 +146,112 @@ def _load_focused_pages() -> List[Dict[str, Any]]:
         if figma_url:
             info = parse_figma_url(figma_url)
             if not info.ok() or not info.node_id:
-                print(
-                    f"[ERROR] 第 {idx+1} 条 figma_url 无法解析: {figma_url}\n"
-                    f"        请确保 URL 带有 ?node-id=xxxx-yyyy."
-                )
+                print(f"[ERROR] 第 {idx+1} 条 figma_url 无法解析: {figma_url}")
                 sys.exit(1)
             figma_node = info.node_id
             file_key = info.file_key
         else:
-            # 允许最短配置: 不写 figma_node / figma_url 时, 回退到 .env 的
-            # FIGMA_TARGET_NODE_ID 作为默认节点, 便于先批量跑站点页面验证.
             if not figma_node:
                 figma_node = env_default_node
             if not figma_node:
-                print(
-                    f"[ERROR] 第 {idx+1} 条既没有 figma_url 也没有 figma_node, "
-                    f"且 .env 未提供 FIGMA_TARGET_NODE_ID 默认值."
-                )
+                print(f"[ERROR] 第 {idx+1} 条缺少 figma_node，且 .env 未设置默认节点")
                 sys.exit(1)
             file_key = env_file_key
             if not file_key:
-                print(
-                    f"[ERROR] 第 {idx+1} 条只填了 figma_node, 但 .env 里没设置 "
-                    f"FIGMA_DESIGN_URL / FIGMA_FILE_KEY 作为默认 file_key."
-                )
+                print(f"[ERROR] 第 {idx+1} 条缺少 file_key，请在 .env 设置 FIGMA_DESIGN_URL")
                 sys.exit(1)
             figma_url = _build_figma_url(file_key, figma_node)
 
-        # ── 2) 网站 URL ───────────────────────────
         site_url = (p.get("site_url") or "").strip()
         site_path = (p.get("site_path") or "").strip()
         if not site_url:
             if not site_path:
-                print(
-                    f"[ERROR] 第 {idx+1} 条既没有 site_url 也没有 site_path, "
-                    f"至少要填一个."
-                )
+                print(f"[ERROR] 第 {idx+1} 条缺少 site_url / site_path")
                 sys.exit(1)
             if not Config.BASE_URL:
-                print(
-                    f"[ERROR] 第 {idx+1} 条用了 site_path, 但 .env 里没设置 BASE_URL."
-                )
+                print(f"[ERROR] 第 {idx+1} 条用了 site_path，但 .env 未设置 BASE_URL")
                 sys.exit(1)
             site_url = _join_site_url(site_path)
 
         key = (p.get("key") or f"page_{idx+1}").strip()
         label = (p.get("label") or key.title()).strip()
-
-        pages.append(
-            {
-                "key": key,
-                "label": label,
-                "figma_node": figma_node,
-                "figma_file_key": file_key,
-                "figma_url": figma_url,
-                "site_url": site_url,
-            }
-        )
+        pages.append({
+            "key": key,
+            "label": label,
+            "figma_node": figma_node,
+            "figma_file_key": file_key,
+            "figma_url": figma_url,
+            "site_url": site_url,
+            "figma_scope": (p.get("figma_scope") or "").strip(),
+        })
     return pages
 
 
-FOCUSED_PAGES: List[Dict[str, Any]] = _load_focused_pages()
+def _load_template_format(
+    raw: Dict[str, Any],
+    known_templates: List[str],
+    template_filter: Optional[str],
+) -> List[Dict[str, Any]]:
+    """解析新模板格式，返回平铺的页面列表。"""
+    env_file_key = (Config.FIGMA_FILE_KEY or "").strip() or None
+    if not env_file_key:
+        print("[ERROR] .env 未设置 FIGMA_DESIGN_URL 或 FIGMA_FILE_KEY")
+        sys.exit(1)
+    if not Config.BASE_URL:
+        print("[ERROR] .env 未设置 BASE_URL（网站地址）")
+        sys.exit(1)
+
+    to_process = [template_filter] if template_filter else known_templates
+    pages: List[Dict[str, Any]] = []
+    skipped: List[str] = []
+
+    for tmpl_name in to_process:
+        if tmpl_name not in raw:
+            print(f"[ERROR] 配置中未找到模板 '{tmpl_name}'，可用: {known_templates}")
+            sys.exit(1)
+
+        tmpl = raw[tmpl_name]
+        node = (tmpl.get("figma_node") or "").strip().replace("-", ":")
+
+        if not node:
+            if template_filter:
+                # 明确指定了但未配置，报错
+                print(
+                    f"[ERROR] '{tmpl_name}' 的 figma_node 为空\n"
+                    f"        请在 focused_pages.json 的 {tmpl_name}.figma_node 填写节点 ID"
+                )
+                sys.exit(1)
+            skipped.append(tmpl_name)
+            continue
+
+        for p in (tmpl.get("pages") or []):
+            key = (p.get("key") or f"{tmpl_name}_{len(pages)+1}").strip()
+            label = (p.get("label") or key).strip()
+            path = (p.get("path") or "/").strip()
+            pages.append({
+                "key": key,
+                "label": label,
+                "figma_node": node,
+                "figma_file_key": env_file_key,
+                "figma_url": _build_figma_url(env_file_key, node),
+                "site_url": _join_site_url(path),
+                "template": tmpl_name,
+                "figma_scope": (p.get("figma_scope") or "").strip(),
+            })
+
+    if skipped:
+        print(f"[SKIP] figma_node 为空，自动跳过: {', '.join(skipped)}")
+
+    if not pages:
+        print(
+            "[ERROR] 没有可运行的页面。\n"
+            "        请在 focused_pages.json 中填写至少一个模板的 figma_node，例如：\n"
+            '        "games": { "figma_node": "16000:13788", ... }'
+        )
+        sys.exit(1)
+
+    return pages
+
 
 STABLE_BLOCKS = [
     {
@@ -236,15 +303,16 @@ FOCUSED_REPORT_DIR = Config.REPORTS_DIR / "focused_ui_report"
 
 def _img_src(path: str) -> str:
     """Return a filename-only reference so images load even when the whole
-    ``focused_ui_report/`` folder is sent/copied/zipped elsewhere."""
+    report folder is sent/copied/zipped elsewhere.
+
+    All images are flat inside the report directory, so ``basename`` is enough.
+    This function no longer depends on the global FOCUSED_REPORT_DIR, so
+    multi-template runs each get the correct relative path automatically.
+    """
     p = Path(path)
     if not p.exists():
         return ""
-    # Everything under FOCUSED_REPORT_DIR is flat, so just the filename works.
-    try:
-        return p.resolve().relative_to(FOCUSED_REPORT_DIR.resolve()).as_posix()
-    except ValueError:
-        return p.name
+    return p.name
 
 
 def _force_remove(path: Path) -> bool:
@@ -293,27 +361,32 @@ def _clean_dir_contents(directory: Path) -> list:
     return locked
 
 
-def _clean_output_dirs() -> None:
+def _clean_output_dirs(report_dir: Optional[Path] = None) -> None:
     """每次运行前清空上次产物，确保报告始终是最新内容。
+
+    Args:
+        report_dir: 报告目录路径。默认使用 FOCUSED_REPORT_DIR；
+                    多模板运行时传入对应模板的目录（如 focused_ui_report_games/）。
 
     Windows 注意事项：
       如果 index.html 正在被浏览器打开（文件被锁定），该文件无法删除。
       此时清理函数会打印警告并跳过该文件，新内容会直接覆盖写入——
       刷新浏览器（F5 或 Ctrl+R）即可看到最新报告。
     """
+    rd = report_dir or FOCUSED_REPORT_DIR
     Config.setup_directories()
 
     # 1) 清空自包含报告目录（HTML + 所有 PNG）
     locked_files: list = []
-    if FOCUSED_REPORT_DIR.exists():
-        locked_files = _clean_dir_contents(FOCUSED_REPORT_DIR)
+    if rd.exists():
+        locked_files = _clean_dir_contents(rd)
         # 若目录已完全清空，删除并重建；否则保留目录（内含锁定文件）
         if not locked_files:
             try:
-                FOCUSED_REPORT_DIR.rmdir()
+                rd.rmdir()
             except Exception:
                 pass
-    FOCUSED_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    rd.mkdir(parents=True, exist_ok=True)
 
     if locked_files:
         print(
@@ -383,6 +456,93 @@ def _node_box(node: Dict[str, Any]) -> Optional[Tuple[float, float, float, float
     if w <= 0 or h <= 0:
         return None
     return x, y, w, h
+
+
+def _page_scope_hints(page: Dict[str, Any]) -> List[str]:
+    """Build robust scope hints for picking a child frame in a large CANVAS."""
+    hints: List[str] = []
+    explicit = (page.get("figma_scope") or "").strip().lower()
+    if explicit:
+        hints.append(explicit)
+
+    key = (page.get("key") or "").strip().lower()
+    label = (page.get("label") or "").strip().lower()
+    url = (page.get("site_url") or "").strip().lower()
+    hints.extend([key, label])
+
+    # Heuristics for common naming drifts in design files.
+    if "home" in key or "home" in label:
+        hints.extend(["home", "index"])
+    if "category" in key or "category" in label or "/games/" in url:
+        hints.extend(["category", "categories", "list", "search-result"])
+    if (
+        "detail" in key
+        or "details" in key
+        or "detail" in label
+        or "details" in label
+        or "/play" in url
+    ):
+        hints.extend(["detail", "details", "play", "game-detail"])
+
+    # Deduplicate while preserving order.
+    dedup: List[str] = []
+    for h in hints:
+        h = h.strip()
+        if h and h not in dedup:
+            dedup.append(h)
+    return dedup
+
+
+def _select_figma_scope_node(root: Dict[str, Any], page: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """Select the page-specific child frame from a multi-page CANVAS node.
+
+    When the design node is a CANVAS containing siblings like "home/category/details",
+    this picks the best-matching child frame and returns:
+      (selected_node, selected_name)
+    """
+    children = root.get("children") or []
+    if not children:
+        return root, (root.get("name") or "")
+
+    hints = _page_scope_hints(page)
+    if not hints:
+        return root, (root.get("name") or "")
+
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for idx, child in enumerate(children):
+        box = _node_box(child)
+        if not box:
+            continue
+        name = (child.get("name") or "").strip()
+        lname = name.lower()
+        ctype = (child.get("type") or "").upper()
+        if ctype not in {"FRAME", "COMPONENT", "SECTION", "GROUP"}:
+            continue
+
+        score = 0.0
+        for h in hints:
+            if lname == h:
+                score += 8.0
+            elif h in lname:
+                score += 3.0
+            elif lname in h:
+                score += 1.0
+
+        # Slight preference for top-level "page-sized" frames.
+        _, _, w, h = box
+        if w >= 1000 and h >= 700:
+            score += 1.5
+
+        # Stable tie-breaker: earlier nodes first.
+        score -= idx * 0.001
+        if score > 0:
+            scored.append((score, child))
+
+    if not scored:
+        return root, (root.get("name") or "")
+    scored.sort(key=lambda x: x[0], reverse=True)
+    picked = scored[0][1]
+    return picked, (picked.get("name") or "")
 
 
 # Per-block constraints used when picking a Figma layer as the visual block.
@@ -1366,8 +1526,46 @@ def _render_markdown(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], 
     return output_path
 
 
-def run() -> Dict[str, Any]:
-    _clean_output_dirs()
+def _parse_template_arg() -> str:
+    """从 sys.argv 解析 --template NAME，返回模板名称。
+
+    未指定时返回空字符串（使用默认配置 focused_pages.json）。
+
+    支持两种写法：
+      python -m src.focused_ui_check --template games
+      python -m src.focused_ui_check --template=news
+    """
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == "--template" and i + 1 < len(args):
+            return args[i + 1].strip().lower()
+        if a.startswith("--template="):
+            return a.split("=", 1)[1].strip().lower()
+    return ""
+
+
+def run(template: str = "") -> Dict[str, Any]:
+    """运行聚焦 UI 对比流水线（单模板）。
+
+    Args:
+        template: 模板名称（"games" / "news"）。
+                  空字符串 → 读取全部已启用模板（旧格式兼容）。
+    """
+    _tmpl = template.strip().lower()
+
+    if _tmpl:
+        report_dir = Config.REPORTS_DIR / f"focused_ui_report_{_tmpl}"
+        json_prefix = f"focused_{_tmpl}_"
+        print(f"\n{'='*60}")
+        print(f"[Focused UI Check]  模板: {_tmpl.upper()}")
+        print(f"  报告目录: {report_dir}")
+        print(f"{'='*60}\n")
+    else:
+        report_dir = FOCUSED_REPORT_DIR
+        json_prefix = "focused_"
+
+    pages = _load_focused_pages(FOCUSED_PAGES_CONFIG, template_filter=_tmpl or None)
+    _clean_output_dirs(report_dir)
 
     version = (Config.BASE_DIR / "VERSION").read_text(encoding="utf-8").strip()
     # 支持跨 Figma 文件对比: 每个 file_key 对应一个 FigmaClient,按需缓存.
@@ -1404,32 +1602,46 @@ def run() -> Dict[str, Any]:
         headless=Config.HEADLESS,
         viewport={"width": Config.AGENT_VIEWPORT_WIDTH, "height": Config.AGENT_VIEWPORT_HEIGHT},
     ) as capture:
-        for page in FOCUSED_PAGES:
+        for page in pages:
             key = page["key"]
             # Every image for this run lives flat inside the self-contained
             # report folder, so shipping the folder gives the reader a
             # fully-working HTML report with all screenshots attached.
-            figma_path = FOCUSED_REPORT_DIR / f"{key}_full_figma.png"
-            web_path = FOCUSED_REPORT_DIR / f"{key}_full_web.png"
-            diff_path = FOCUSED_REPORT_DIR / f"{key}_full_diff.png"
-            compare_path = FOCUSED_REPORT_DIR / f"{key}_full_compare.png"
+            figma_path = report_dir / f"{key}_full_figma.png"
+            web_path = report_dir / f"{key}_full_web.png"
+            diff_path = report_dir / f"{key}_full_diff.png"
+            compare_path = report_dir / f"{key}_full_compare.png"
 
-            # 1) Pull the Figma node JSON FIRST so we know the design canvas size,
-            #    then align the browser viewport to the Figma frame width. This
-            #    makes 1 CSS px ≈ 1 Figma design px, so coordinates are directly
-            #    comparable and cropped blocks are already at the same scale.
+            # 1) Pull Figma node JSON. If this node is a multi-page CANVAS
+            #    (home/category/details in one node), auto-pick the child frame
+            #    matching current page and compare within that scope only.
             figma = _get_figma(page.get("figma_file_key"))
             node_json = figma.get_node_json(page["figma_node"])
             ReportWriter._write_json(Config.REPORTS_DIR / "json" / f"focused_figma_{key}.json", node_json)
-            root_box = _node_box(node_json)
+
+            scope_node, scope_name = _select_figma_scope_node(node_json, page)
+            root_box = _node_box(scope_node) or _node_box(node_json)
             design_w = int(round(root_box[2])) if root_box else Config.AGENT_VIEWPORT_WIDTH
             design_h = int(round(root_box[3])) if root_box else Config.AGENT_VIEWPORT_HEIGHT
             # Cap viewport width so we do not launch absurd viewports on large designs.
             viewport_w = max(360, min(design_w, 2560))
             viewport_h = max(600, min(design_h, 2200))
 
-            # 2) Export Figma at scale=1 so PNG pixels == design pixels.
-            figma.save_node_to_file(page["figma_node"], figma_path, scale=1)
+            # 2) Export full node at scale=1, then crop to selected page scope
+            #    when needed. This fixes "one node contains multiple pages".
+            figma_raw_path = norm_tmp / f"{key}_figma_raw.png"
+            figma.save_node_to_file(page["figma_node"], figma_raw_path, scale=1)
+            full_root_box = _node_box(node_json)
+            scope_box = _node_box(scope_node)
+            if (
+                scope_node is not node_json
+                and full_root_box is not None
+                and scope_box is not None
+            ):
+                _crop_from_figma_image(figma_raw_path, full_root_box, scope_box, figma_path)
+            else:
+                # Already a page-level frame; keep as-is.
+                shutil.copyfile(figma_raw_path, figma_path)
 
             # 3) Capture the site at the Figma-aligned viewport width.
             capture.page.set_viewport_size({"width": viewport_w, "height": viewport_h})
@@ -1459,6 +1671,8 @@ def run() -> Dict[str, Any]:
                     "similarity": float(similarity),
                     "threshold": float(Config.SIMILARITY_THRESHOLD),
                     "passed": similarity >= Config.SIMILARITY_THRESHOLD,
+                    "figma_scope_name": scope_name,
+                    "figma_scope_id": scope_node.get("id", ""),
                     "figma_path": str(figma_path),
                     "web_path": str(web_path),
                     "diff_path": str(diff_path),
@@ -1472,12 +1686,12 @@ def run() -> Dict[str, Any]:
             block_results = []
             for block in STABLE_BLOCKS:
                 bkey = block["key"]
-                fig_block_path = FOCUSED_REPORT_DIR / f"{key}_{bkey}_figma.png"
-                web_block_path = FOCUSED_REPORT_DIR / f"{key}_{bkey}_web.png"
-                diff_block_path = FOCUSED_REPORT_DIR / f"{key}_{bkey}_diff.png"
+                fig_block_path = report_dir / f"{key}_{bkey}_figma.png"
+                web_block_path = report_dir / f"{key}_{bkey}_web.png"
+                diff_block_path = report_dir / f"{key}_{bkey}_diff.png"
 
                 # --- Figma side: crop the exact layer bbox when we can identify it.
-                node_for_block = _pick_figma_block_node(node_json, block)
+                node_for_block = _pick_figma_block_node(scope_node, block)
                 abs_box: Optional[Tuple[float, float, float, float]] = None
                 figma_layer_name = ""
                 if node_for_block and root_box:
@@ -1544,7 +1758,7 @@ def run() -> Dict[str, Any]:
                     }
                 )
 
-            figma_elements = figma_extractor.extract_semantic(node_json, max_depth=Config.COMPARE_MAX_DEPTH)
+            figma_elements = figma_extractor.extract_semantic(scope_node, max_depth=Config.COMPARE_MAX_DEPTH)
             figma_elements = [
                 e for e in figma_elements
                 if e.width >= 12
@@ -1576,6 +1790,8 @@ def run() -> Dict[str, Any]:
                 "page_key": key,
                 "page_label": page["label"],
                 "figma_node": page["figma_node"],
+                "figma_scope_name": scope_name,
+                "figma_scope_id": scope_node.get("id", ""),
                 "figma_url": page["figma_url"],
                 "site_url": page["site_url"],
                 "result": result,
@@ -1601,7 +1817,7 @@ def run() -> Dict[str, Any]:
             # Details pages mostly re-expose the same header/footer/related
             # links found on Home + Category. We keep the per-page cap small
             # so only its genuinely unique links show up after global dedup.
-            if key == "details":
+            if key in {"detail", "details"} or "detail" in key:
                 max_links_here, max_buttons_here = 8, 6
             else:
                 max_links_here, max_buttons_here = 25, 12
@@ -1635,6 +1851,7 @@ def run() -> Dict[str, Any]:
                     "key": key,
                     "label": page["label"],
                     "figma_url": page["figma_url"],
+                    "figma_scope_name": scope_name,
                     "site_url": page["site_url"],
                     "pixel": {
                         "similarity": float(similarity),
@@ -1662,32 +1879,82 @@ def run() -> Dict[str, Any]:
         "page_results": page_results,
         "function_check_global": function_agg,
     }
-    ReportWriter._write_json(Config.REPORTS_DIR / "json" / "focused_run_result.json", focused_run)
-    ReportWriter._write_json(Config.REPORTS_DIR / "json" / "focused_element_diffs.json", {"pages": element_pages})
-    ReportWriter._write_json(
-        Config.REPORTS_DIR / "json" / "focused_function_global.json", function_agg
-    )
+    # JSON 文件名加模板前缀，避免两套模板互相覆盖
+    json_dir = Config.REPORTS_DIR / "json"
+    ReportWriter._write_json(json_dir / f"{json_prefix}run_result.json", focused_run)
+    ReportWriter._write_json(json_dir / f"{json_prefix}element_diffs.json", {"pages": element_pages})
+    ReportWriter._write_json(json_dir / f"{json_prefix}function_global.json", function_agg)
 
     # Write HTML + Markdown INSIDE the self-contained folder so it can be
     # zipped / mailed in one shot (every <img> points to a sibling file).
-    html_path = _render_html(element_pages, function_agg, FOCUSED_REPORT_DIR / "index.html")
-    md_path = _render_markdown(element_pages, function_agg, FOCUSED_REPORT_DIR / "summary.md")
+    html_path = _render_html(element_pages, function_agg, report_dir / "index.html")
+    md_path = _render_markdown(element_pages, function_agg, report_dir / "summary.md")
 
     # Drop the normalization scratch dir once the report is written.
     shutil.rmtree(norm_tmp, ignore_errors=True)
 
     print(f"[OK] Focused report generated: {html_path}")
-    print(f"[OK] Folder (zip & send this): {FOCUSED_REPORT_DIR}")
+    print(f"[OK] Folder (zip & send this): {report_dir}")
     print(f"[OK] Focused summary generated: {md_path}")
     return {
+        "template": _tmpl or "default",
         "focused_run": focused_run,
         "element_pages": element_pages,
         "function_check_global": function_agg,
         "html_report": str(html_path),
         "markdown_summary": str(md_path),
-        "report_folder": str(FOCUSED_REPORT_DIR),
+        "report_folder": str(report_dir),
     }
 
 
 if __name__ == "__main__":
-    run()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m src.focused_ui_check",
+        description=(
+            "聚焦 UI 对比。\n"
+            "配置文件：config/focused_pages.json\n"
+            "  - games.figma_node 填写 → 自动运行游戏模板\n"
+            "  - news.figma_node  填写 → 自动运行资讯模板\n"
+            "  - 两个都填 → 同时运行两套，各自生成独立报告"
+        ),
+    )
+    parser.add_argument(
+        "--template",
+        metavar="NAME",
+        default="",
+        help="强制只跑指定模板（games / news）。不传则自动运行所有已配置模板。",
+    )
+    args = parser.parse_args()
+
+    if args.template:
+        # 明确指定模板：只跑一套
+        run(template=args.template)
+    else:
+        # 自动检测：读配置，看哪些模板填了 figma_node 就跑哪些
+        try:
+            _raw = json.loads(FOCUSED_PAGES_CONFIG.read_text(encoding="utf-8"))
+        except Exception:
+            _raw = {}
+
+        _known = [k for k in ("games", "news") if k in _raw]
+
+        if _known:
+            # 新模板格式：逐模板判断
+            _enabled = [
+                k for k in _known
+                if (_raw[k].get("figma_node") or "").strip()
+            ]
+            if not _enabled:
+                print(
+                    "[ERROR] focused_pages.json 中所有模板的 figma_node 均为空。\n"
+                    "        请填写至少一个模板的 figma_node 后再运行。\n"
+                    "        示例：games.figma_node = \"16000:13788\""
+                )
+                sys.exit(1)
+            for _tmpl in _enabled:
+                run(template=_tmpl)
+        else:
+            # 旧平铺格式：直接跑
+            run()
