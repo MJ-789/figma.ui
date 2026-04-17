@@ -28,9 +28,12 @@ src/figma_client.py  ── Figma REST API 客户端
     来自 Figma 编辑器右键菜单"Copy link to selection"或开发者面板。
 """
 
+import time
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib3.exceptions import ProtocolError
 from typing import Dict, List, Optional
 from pathlib import Path
 from config.config import Config
@@ -86,21 +89,52 @@ class FigmaClient:
     # 基础API
     # =====================================================
 
+    # 对流式/连接级错误做应用级重试 —— urllib3.Retry 只管状态码,
+    # 管不到 "传到一半断流" 这类 ChunkedEncodingError / ProtocolError.
+    _STREAM_ERRORS = (
+        requests.exceptions.ChunkedEncodingError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        ProtocolError,
+    )
+    _MAX_STREAM_RETRIES = 4
+    _STREAM_BACKOFF = 3  # 秒, 指数退避 base
+
     def _get(self, url: str, params: dict = None) -> Dict:
-        """统一 GET 请求（120s 超时，自动重试）"""
+        """统一 GET 请求 (120s 超时, 状态码+流错误双重重试)."""
 
-        response = self.session.get(url, params=params, timeout=120)
+        last_err: Optional[Exception] = None
+        for attempt in range(1, self._MAX_STREAM_RETRIES + 1):
+            try:
+                response = self.session.get(url, params=params, timeout=120)
+                response.raise_for_status()
+                return response.json()
+            except self._STREAM_ERRORS as e:
+                last_err = e
+                if attempt == self._MAX_STREAM_RETRIES:
+                    break
+                wait = self._STREAM_BACKOFF * (2 ** (attempt - 1))
+                print(
+                    f"   ⚠️  Figma API 网络异常 ({type(e).__name__}): "
+                    f"第 {attempt}/{self._MAX_STREAM_RETRIES} 次, "
+                    f"{wait}s 后重试..."
+                )
+                time.sleep(wait)
+            except requests.exceptions.HTTPError as e:
+                raise RuntimeError(
+                    f"Figma API请求失败\n"
+                    f"URL: {url}\n"
+                    f"Status: {e.response.status_code}\n"
+                    f"Response: {e.response.text[:500]}"
+                ) from e
 
-        try:
-            response.raise_for_status()
-        except Exception:
-            raise RuntimeError(
-                f"Figma API请求失败\n"
-                f"URL: {url}\n"
-                f"Response: {response.text}"
-            )
-
-        return response.json()
+        raise RuntimeError(
+            f"Figma API 连续 {self._MAX_STREAM_RETRIES} 次网络失败\n"
+            f"URL: {url}\n"
+            f"最后一次错误: {type(last_err).__name__}: {last_err}\n"
+            f"建议: 检查网络(或开/关 VPN),稍后再试; "
+            f"或先运行 `python run_agent.py`(复用缓存,不重新拉 Figma)."
+        ) from last_err
 
     # =====================================================
     # 文件结构
@@ -250,11 +284,28 @@ class FigmaClient:
         if not image_url:
             raise RuntimeError(f"无法导出节点: {node_id}")
 
-        img = self.session.get(image_url)
+        # CDN 下载同样可能中途断流, 走一层应用级重试.
+        last_err: Optional[Exception] = None
+        for attempt in range(1, self._MAX_STREAM_RETRIES + 1):
+            try:
+                img = self.session.get(image_url, timeout=120)
+                img.raise_for_status()
+                return img.content
+            except self._STREAM_ERRORS as e:
+                last_err = e
+                if attempt == self._MAX_STREAM_RETRIES:
+                    break
+                wait = self._STREAM_BACKOFF * (2 ** (attempt - 1))
+                print(
+                    f"   ⚠️  Figma 图片下载异常 ({type(e).__name__}): "
+                    f"第 {attempt}/{self._MAX_STREAM_RETRIES} 次, {wait}s 后重试..."
+                )
+                time.sleep(wait)
 
-        img.raise_for_status()
-
-        return img.content
+        raise RuntimeError(
+            f"Figma 图片下载失败 node={node_id}, "
+            f"错误: {type(last_err).__name__}: {last_err}"
+        ) from last_err
 
     # =====================================================
     # 保存图片
