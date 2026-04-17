@@ -253,7 +253,7 @@ def _load_template_format(
     return pages
 
 
-STABLE_BLOCKS = [
+GENERIC_STABLE_BLOCKS = [
     {
         "key": "header",
         "label": "Header",
@@ -284,9 +284,54 @@ STABLE_BLOCKS = [
     },
 ]
 
+# games 专用：不再沿用通用 Header/Hero/Content/Footer 语义，改为更贴近
+# justalplay 页面结构的分块。用于降低“结构块错位”导致的误报。
+GAMES_STABLE_BLOCKS = [
+    {
+        "key": "page_marker",
+        "label": "页面标记区（home/category/details）",
+        "figma_patterns": ["home", "category", "details", "rectangle 20"],
+        "web_selectors": ["main", "body"],
+        "fallback_ratio": [0.0, 0.0, 0.30, 0.22],
+    },
+    {
+        "key": "top_nav",
+        "label": "顶栏导航区（Logo + 分类导航）",
+        "figma_patterns": ["logo", "nav", "menu", "category", "top"],
+        "web_selectors": ["header", "[role='banner']", "nav", ".header"],
+        "fallback_ratio": [0.10, 0.16, 1.0, 0.34],
+    },
+    {
+        "key": "search_bar",
+        "label": "搜索条区（Search/Input）",
+        "figma_patterns": ["search", "find", "input", "game name"],
+        "web_selectors": [
+            "input[placeholder*='game' i]",
+            "form[role='search']",
+            "[class*='search']",
+            ".search",
+        ],
+        "fallback_ratio": [0.20, 0.24, 0.98, 0.46],
+    },
+    {
+        "key": "game_list",
+        "label": "游戏列表区（卡片内容）",
+        "figma_patterns": ["list", "card", "must-play", "content", "destiny", "newly released"],
+        "web_selectors": ["main", "[role='main']", ".content", ".list", "article", "[class*='card']"],
+        "fallback_ratio": [0.18, 0.40, 0.98, 0.88],
+    },
+    {
+        "key": "bottom_action",
+        "label": "底部/侧边互动区（Footer/点赞评论）",
+        "figma_patterns": ["footer", "comment", "like", "copyright", "company", "categories"],
+        "web_selectors": ["footer", "[role='contentinfo']", ".footer", "[class*='comment']", "[class*='social']"],
+        "fallback_ratio": [0.0, 0.84, 1.0, 1.0],
+    },
+]
+
 _NOISE_NAME_RE = re.compile(r"^(image\s+\d+|frame\s*\d*|group\s*\d*)$", re.IGNORECASE)
 
-# 字体排版属性在此模式下跳过：
+# 默认（非 games）字体排版属性跳过：
 #   Figma 的字体渲染引擎（Figma Desktop / Web）与浏览器（Chrome/Safari）
 #   在字距、行高、字重映射上存在系统性偏差，直接对比会产生大量误报。
 #   本模式聚焦"视觉结构"（尺寸/布局/颜色/圆角），字体问题请用像素截图差异图辅助人工判断。
@@ -294,11 +339,51 @@ _SKIP_PROPS = {"font_family", "font_size", "font_weight", "line_height", "text_c
 # 用于报告展示（中文名称）
 _SKIP_PROPS_LABELS = ["字体", "字号", "字重", "行高", "文字色"]
 
+# games 模板要求：字体问题不能忽略 → 不跳过任何字体属性。
+_SKIP_PROPS_GAMES = set()
+_SKIP_PROPS_LABELS_GAMES: List[str] = []
+
 
 # Self-contained report folder. Every artifact the user needs to view the
 # report (HTML + screenshots + markdown) lives inside this one folder so
 # it can be zipped and e-mailed in a single step.
 FOCUSED_REPORT_DIR = Config.REPORTS_DIR / "focused_ui_report"
+
+
+def _resolve_compare_profile(template: str) -> Dict[str, Any]:
+    """Resolve block strategy + property compare policy by template."""
+    tmpl = (template or "").strip().lower()
+    if tmpl == "games":
+        return {
+            "name": "games",
+            "blocks": GAMES_STABLE_BLOCKS,
+            "skip_props": _SKIP_PROPS_GAMES,
+            "skip_prop_labels": _SKIP_PROPS_LABELS_GAMES,
+            "strategy_cn": (
+                "games 模板启用专用稳定结构块（页面标记区、顶栏导航区、搜索条区、游戏列表区、"
+                "底部/侧边互动区），并开启字体属性对比（不忽略字体、字号、字重、行高、文字色）。"
+            ),
+            "html_note": (
+                "✅ <b>已启用字体属性对比</b>（字体 / 字号 / 字重 / 行高 / 文字色）。"
+                "说明：games 模板按实际业务要求，不再跳过字体相关属性。"
+            ),
+        }
+    return {
+        "name": "generic",
+        "blocks": GENERIC_STABLE_BLOCKS,
+        "skip_props": _SKIP_PROPS,
+        "skip_prop_labels": _SKIP_PROPS_LABELS,
+        "strategy_cn": (
+            "通用模板使用 Header/Hero/Content/Footer 稳定块，并默认跳过字体类属性，"
+            "避免 Figma 与浏览器渲染差异造成系统性误报。"
+        ),
+        "html_note": (
+            "ℹ️ <b>已跳过字体属性对比</b>（"
+            + ", ".join(_SKIP_PROPS_LABELS)
+            + "）：Figma 渲染引擎与浏览器存在系统性字体差异，"
+            "直接对比噪音多于信号。字体问题请结合像素差异图判断。"
+        ),
+    }
 
 
 def _img_src(path: str) -> str:
@@ -558,6 +643,12 @@ _BLOCK_CONSTRAINTS = {
     "footer":  {"max_depth": 2, "min_width_ratio": 0.6, "min_height": 60,  "max_height_ratio": 0.30, "max_height_px": 900,  "y_rel_range": (0.55, 1.0)},
     "hero":    {"max_depth": 2, "min_width_ratio": 0.6, "min_height": 200, "max_height_ratio": 0.45, "max_height_px": 1100, "y_rel_range": (0.03, 0.45)},
     "content": {"max_depth": 2, "min_width_ratio": 0.6, "min_height": 200, "max_height_ratio": 0.35, "max_height_px": 900,  "y_rel_range": (0.15, 0.9)},
+    # games 专用块
+    "page_marker":  {"max_depth": 2, "min_width_ratio": 0.10, "min_height": 40,  "max_height_ratio": 0.35, "max_height_px": 420,  "y_rel_range": (0.0, 0.30)},
+    "top_nav":      {"max_depth": 2, "min_width_ratio": 0.55, "min_height": 40,  "max_height_ratio": 0.22, "max_height_px": 460,  "y_rel_range": (0.08, 0.38)},
+    "search_bar":   {"max_depth": 2, "min_width_ratio": 0.45, "min_height": 48,  "max_height_ratio": 0.25, "max_height_px": 500,  "y_rel_range": (0.14, 0.55)},
+    "game_list":    {"max_depth": 2, "min_width_ratio": 0.50, "min_height": 180, "max_height_ratio": 0.60, "max_height_px": 1600, "y_rel_range": (0.26, 0.95)},
+    "bottom_action":{"max_depth": 2, "min_width_ratio": 0.12, "min_height": 80,  "max_height_ratio": 0.30, "max_height_px": 1000, "y_rel_range": (0.55, 1.0)},
 }
 
 
@@ -767,6 +858,23 @@ def _crop_web_block_from_full(
         img.crop((left, top, right, bottom)).save(output_path)
         return (float(x), float(y), float(w), float(h))
     return None
+
+
+def _goto_page_robust(page, url: str, timeout_ms: int = 30000) -> None:
+    """Navigate with fallback to reduce flaky networkidle timeouts."""
+    try:
+        page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+        return
+    except Exception as e1:
+        # Some sites keep analytics/polling requests alive and never reach
+        # strict networkidle. Fallback to DOM ready so comparison can proceed.
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(1200)
+            print(f"[WARN] networkidle 超时，已降级为 domcontentloaded: {url} ({type(e1).__name__})")
+            return
+        except Exception:
+            raise
 
 
 def _normalize_pair_for_compare(
@@ -1212,14 +1320,18 @@ def _safe_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
         print(f"[WARN] 无法写入 {path.name}: {exc}  → 刷新浏览器 (F5) 后重试")
 
 
-def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], output_path: Path) -> Path:
+def _render_html(
+    pages: List[Dict[str, Any]],
+    function_agg: Dict[str, Any],
+    output_path: Path,
+    stable_blocks: List[Dict[str, Any]],
+    compare_note_html: str,
+) -> Path:
     page_rows = []
-    # Visual/structural issues only — typography properties are skipped at
-    # the compare layer (see _SKIP_PROPS).
     issue_keys = ["fill_color", "border_radius", "width", "height", "unmatched"]
     issue_header = "".join(f"<th>{k}</th>" for k in issue_keys)
     issue_rows = []
-    block_header = "".join(f"<th>{b['label']}</th>" for b in STABLE_BLOCKS)
+    block_header = "".join(f"<th>{b['label']}</th>" for b in stable_blocks)
     block_rows = []
     for page in pages:
         elem = page["element"]
@@ -1238,7 +1350,7 @@ def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], outp
         block_rows.append(
             "<tr>"
             f"<td>{page['label']}</td>"
-            + "".join(f"<td>{block_map.get(b['key'], 0.0):.2f}%</td>" for b in STABLE_BLOCKS)
+            + "".join(f"<td>{block_map.get(b['key'], 0.0):.2f}%</td>" for b in stable_blocks)
             + "</tr>"
         )
 
@@ -1349,11 +1461,8 @@ def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], outp
     <div><div class="lbl">整页 Side By Side</div><img src="{_img_src(pixel['compare_path'])}" /></div>
   </div>
   <h3>元素级差异列表（可直接改样式）</h3>
-  <p style="font-size:12px;color:#6b7280;margin:0 0 10px;background:#eff6ff;border:1px solid #bfdbfe;
-     border-radius:6px;padding:8px 12px;">
-    ℹ️ <b>已跳过字体属性对比</b>（{', '.join(_SKIP_PROPS_LABELS)}）：
-    Figma 渲染引擎与浏览器存在系统性字体差异，直接对比噪音多于信号。
-    字体问题请通过上方像素差异图辅助人工判断。
+  <p style="font-size:12px;color:#6b7280;margin:0 0 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:8px 12px;">
+    {compare_note_html}
   </p>
   <table>
     <thead>
@@ -1431,11 +1540,18 @@ def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], outp
     return output_path
 
 
-def _render_markdown(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], output_path: Path) -> Path:
+def _render_markdown(
+    pages: List[Dict[str, Any]],
+    function_agg: Dict[str, Any],
+    output_path: Path,
+    compare_strategy_cn: str,
+) -> Path:
     lines = [
         "# Focused UI Summary",
         "",
         "This report compares 3 fixed pages. Content text is not used as the core matching signal; the comparison focuses on layout, typography, colors, size, and radius.",
+        "",
+        f"对比策略：{compare_strategy_cn}",
         "",
     ]
     for page in pages:
@@ -1566,6 +1682,12 @@ def run(template: str = "") -> Dict[str, Any]:
 
     pages = _load_focused_pages(FOCUSED_PAGES_CONFIG, template_filter=_tmpl or None)
     _clean_output_dirs(report_dir)
+    profile = _resolve_compare_profile(_tmpl)
+    stable_blocks = profile["blocks"]
+    skip_props = profile["skip_props"]
+    skip_prop_labels = profile["skip_prop_labels"]
+    compare_strategy_cn = profile["strategy_cn"]
+    compare_note_html = profile["html_note"]
 
     version = (Config.BASE_DIR / "VERSION").read_text(encoding="utf-8").strip()
     # 支持跨 Figma 文件对比: 每个 file_key 对应一个 FigmaClient,按需缓存.
@@ -1645,7 +1767,7 @@ def run(template: str = "") -> Dict[str, Any]:
 
             # 3) Capture the site at the Figma-aligned viewport width.
             capture.page.set_viewport_size({"width": viewport_w, "height": viewport_h})
-            capture.page.goto(page["site_url"], wait_until="networkidle", timeout=30000)
+            _goto_page_robust(capture.page, page["site_url"], timeout_ms=30000)
             if Config.AGENT_HIDE_SELECTORS:
                 capture.hide_elements(Config.AGENT_HIDE_SELECTORS)
             # Scroll to top so sticky/lazy elements render at their "initial" state,
@@ -1684,7 +1806,7 @@ def run(template: str = "") -> Dict[str, Any]:
             )
             figma_block_abs_boxes: List[Tuple[float, float, float, float]] = []
             block_results = []
-            for block in STABLE_BLOCKS:
+            for block in stable_blocks:
                 bkey = block["key"]
                 fig_block_path = report_dir / f"{key}_{bkey}_figma.png"
                 web_block_path = report_dir / f"{key}_{bkey}_web.png"
@@ -1781,7 +1903,7 @@ def run(template: str = "") -> Dict[str, Any]:
                 font_size_tol=Config.COMPARE_FONT_SIZE_TOLERANCE,
                 radius_tol=Config.COMPARE_RADIUS_TOLERANCE,
                 min_match_count=Config.COMPARE_MIN_MATCH_COUNT,
-                skip_props=_SKIP_PROPS,
+                skip_props=skip_props,
             )
 
             element_payload = {
@@ -1798,11 +1920,13 @@ def run(template: str = "") -> Dict[str, Any]:
                 "auto_mapped_count": len(auto_map),
                 "stable_blocks": block_results,
                 # 明确记录跳过的属性，供报告层展示说明
-                "skipped_props": sorted(_SKIP_PROPS),
+                "skipped_props": sorted(skip_props),
                 "skipped_props_reason": (
-                    "字体渲染差异（Figma 引擎 vs 浏览器）导致系统性误报，"
-                    "已从元素属性对比中排除。请通过像素差异图辅助排查字体问题。"
+                    "已按当前模板策略决定是否跳过字体类属性。"
+                    if skip_props
+                    else "当前模板已启用字体类属性对比（未跳过字体/字号/字重/行高/文字色）。"
                 ),
+                "compare_strategy": compare_strategy_cn,
                 "compare_config": {
                     "color_tolerance":     Config.COMPARE_COLOR_TOLERANCE,
                     "size_tolerance":      Config.COMPARE_SIZE_TOLERANCE,
@@ -1876,6 +2000,10 @@ def run(template: str = "") -> Dict[str, Any]:
         "version": version,
         "generated_at": datetime.now(UTC).isoformat(),
         "base_url": Config.BASE_URL,
+        "compare_strategy": compare_strategy_cn,
+        "stable_blocks": [b["label"] for b in stable_blocks],
+        "skip_props": sorted(skip_props),
+        "skip_prop_labels": skip_prop_labels,
         "page_results": page_results,
         "function_check_global": function_agg,
     }
@@ -1887,8 +2015,19 @@ def run(template: str = "") -> Dict[str, Any]:
 
     # Write HTML + Markdown INSIDE the self-contained folder so it can be
     # zipped / mailed in one shot (every <img> points to a sibling file).
-    html_path = _render_html(element_pages, function_agg, report_dir / "index.html")
-    md_path = _render_markdown(element_pages, function_agg, report_dir / "summary.md")
+    html_path = _render_html(
+        element_pages,
+        function_agg,
+        report_dir / "index.html",
+        stable_blocks,
+        compare_note_html,
+    )
+    md_path = _render_markdown(
+        element_pages,
+        function_agg,
+        report_dir / "summary.md",
+        compare_strategy_cn,
+    )
 
     # Drop the normalization scratch dir once the report is written.
     shutil.rmtree(norm_tmp, ignore_errors=True)

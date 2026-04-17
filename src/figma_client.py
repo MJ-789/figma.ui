@@ -29,6 +29,7 @@ src/figma_client.py  ── Figma REST API 客户端
 """
 
 import time
+import json
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -48,10 +49,10 @@ class FigmaClient:
         self.file_key = file_key or Config.FIGMA_FILE_KEY
 
         if not self.access_token:
-            raise ValueError("❌ 缺少 FIGMA_ACCESS_TOKEN")
+            raise ValueError("缺少 FIGMA_ACCESS_TOKEN")
 
         if not self.file_key:
-            raise ValueError("❌ 缺少 FIGMA_FILE_KEY")
+            raise ValueError("缺少 FIGMA_FILE_KEY")
 
         self.base_url = "https://api.figma.com/v1"
 
@@ -100,6 +101,16 @@ class FigmaClient:
     _MAX_STREAM_RETRIES = 4
     _STREAM_BACKOFF = 3  # 秒, 指数退避 base
 
+    def _cache_root(self) -> Path:
+        return Config.REPORTS_DIR / "json" / ".figma_cache"
+
+    def _file_cache_path(self) -> Path:
+        return self._cache_root() / f"file_{self.file_key}.json"
+
+    def _node_cache_path(self, node_id: str) -> Path:
+        safe = node_id.replace(":", "_")
+        return self._cache_root() / f"node_{self.file_key}_{safe}.json"
+
     def _get(self, url: str, params: dict = None) -> Dict:
         """统一 GET 请求 (120s 超时, 状态码+流错误双重重试)."""
 
@@ -115,7 +126,7 @@ class FigmaClient:
                     break
                 wait = self._STREAM_BACKOFF * (2 ** (attempt - 1))
                 print(
-                    f"   ⚠️  Figma API 网络异常 ({type(e).__name__}): "
+                    f"   [WARN] Figma API 网络异常 ({type(e).__name__}): "
                     f"第 {attempt}/{self._MAX_STREAM_RETRIES} 次, "
                     f"{wait}s 后重试..."
                 )
@@ -147,8 +158,22 @@ class FigmaClient:
             return self._file_cache
 
         url = f"{self.base_url}/files/{self.file_key}"
+        cache_path = self._file_cache_path()
 
-        data = self._get(url)
+        try:
+            data = self._get(url)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except RuntimeError:
+            # 网络故障兜底：优先复用本地缓存，避免整条流程中断。
+            if cache_path.exists() and not force_refresh:
+                print(f"   [WARN] Figma API 不可用，使用本地缓存: {cache_path}")
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+            else:
+                raise
 
         self._file_cache = data
 
@@ -202,21 +227,21 @@ class FigmaClient:
         """打印所有页面结构（调试用）"""
 
         print("\n" + "=" * 60)
-        print("📐 Figma文件结构")
+        print("Figma文件结构")
         print("=" * 60)
 
         for page in self.list_all_pages():
 
-            print(f"\n📄 页面: {page['name']} (ID: {page['id']})")
+            print(f"\n页面: {page['name']} (ID: {page['id']})")
 
             frames = self.list_frames_in_page(page["name"])
 
             if not frames:
-                print("   └─ (无Frame)")
+                print("   |- (无Frame)")
                 continue
 
             for frame in frames:
-                print(f"   └─ 🖼️ {frame['name']} (ID: {frame['id']})")
+                print(f"   |- Frame: {frame['name']} (ID: {frame['id']})")
 
         print("\n" + "=" * 60)
 
@@ -248,13 +273,26 @@ class FigmaClient:
         """
         node_id = self._normalize_node_id(node_id)
         url = f"{self.base_url}/files/{self.file_key}/nodes"
-        data = self._get(url, params={"ids": node_id})
-        nodes = data.get("nodes", {})
-        if node_id not in nodes:
-            raise RuntimeError(
-                f"节点 {node_id} 不在响应中，请确认 node_id 格式正确（如 '15661:163'）"
+        cache_path = self._node_cache_path(node_id)
+        try:
+            data = self._get(url, params={"ids": node_id})
+            nodes = data.get("nodes", {})
+            if node_id not in nodes:
+                raise RuntimeError(
+                    f"节点 {node_id} 不在响应中，请确认 node_id 格式正确（如 '15661:163'）"
+                )
+            doc = nodes[node_id]["document"]
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(doc, ensure_ascii=False),
+                encoding="utf-8",
             )
-        return nodes[node_id]["document"]
+            return doc
+        except RuntimeError:
+            if cache_path.exists():
+                print(f"   [WARN] 节点 API 不可用，使用本地节点缓存: {cache_path.name}")
+                return json.loads(cache_path.read_text(encoding="utf-8"))
+            raise
 
     # =====================================================
     # 导出图片
@@ -297,7 +335,7 @@ class FigmaClient:
                     break
                 wait = self._STREAM_BACKOFF * (2 ** (attempt - 1))
                 print(
-                    f"   ⚠️  Figma 图片下载异常 ({type(e).__name__}): "
+                    f"   [WARN] Figma 图片下载异常 ({type(e).__name__}): "
                     f"第 {attempt}/{self._MAX_STREAM_RETRIES} 次, {wait}s 后重试..."
                 )
                 time.sleep(wait)
