@@ -1,12 +1,19 @@
 # Figma UI Automation Roadmap
 
+## Version Status
+
+- Current Release: **v1.0**
+- Release Scope: focused 3-page workflow (`home` / `category` / `details`) with
+  design JSON extraction, web capture, element-level comparison, functional checks,
+  and visual HTML reporting.
+
 ## Goals
 
 1. Element-level matching between design and implementation.
 2. Output a list of different elements, not only global similarity.
 3. Expand to multi-page crawling with automatic click navigation.
 
-## Current Limits (v1.0.0)
+## Current Limits (v1.0)
 
 - Comparison is page-level bitmap diff only.
 - No stable element identity map between Figma node and DOM node.
