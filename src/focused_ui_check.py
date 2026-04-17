@@ -98,10 +98,16 @@ _NOISE_NAME_RE = re.compile(r"^(image\s+\d+|frame\s*\d*|group\s*\d*)$", re.IGNOR
 
 
 def _img_src(path: str) -> str:
+    """Return a relative path from the reports/ directory so browsers can load
+    local images without triggering the file:/// cross-origin security block."""
     p = Path(path)
     if not p.exists():
         return ""
-    return p.resolve().as_uri()
+    try:
+        return p.resolve().relative_to(Config.REPORTS_DIR.resolve()).as_posix()
+    except ValueError:
+        # Fallback: just use the filename if relative_to fails
+        return p.name
 
 
 def _clean_output_dirs() -> None:
