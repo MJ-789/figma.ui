@@ -10,7 +10,6 @@ env/
 
 # 运行产出（每次自动覆盖）
 reports/
-knowledge/
 
 # IDE
 .idea/

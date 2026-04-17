@@ -28,13 +28,7 @@ echo [2/10] 创建项目目录结构...
 mkdir config 2>nul
 mkdir src 2>nul
 mkdir tests 2>nul
-mkdir reports\screenshots\figma 2>nul
-mkdir reports\screenshots\web 2>nul
-mkdir reports\screenshots\site 2>nul
-mkdir reports\html 2>nul
-mkdir reports\images 2>nul
 mkdir reports\json 2>nul
-mkdir knowledge 2>nul
 
 :: 创建__init__.py文件
 type nul > config\__init__.py

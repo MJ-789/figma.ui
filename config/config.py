@@ -52,7 +52,6 @@ class Config:
     REPORTS_DIR = BASE_DIR / "reports"
     # 截图统一存放在 reports/ 下，与差异图、JSON、HTML 集中在同一结果目录
     SCREENSHOTS_DIR = REPORTS_DIR / "screenshots"
-    KNOWLEDGE_DIR = BASE_DIR / "knowledge"
 
     @staticmethod
     def _get_bool(name: str, default: str = "false") -> bool:
@@ -65,8 +64,29 @@ class Config:
         return [p.strip() for p in os.getenv(name, default).split(",") if p.strip()]
 
     FIGMA_ACCESS_TOKEN = os.getenv('FIGMA_ACCESS_TOKEN')
-    FIGMA_FILE_KEY = os.getenv('FIGMA_FILE_KEY')
-    FIGMA_TARGET_NODE_ID = os.getenv('FIGMA_TARGET_NODE_ID', '').replace("-", ":").strip()
+
+    # ── Figma 设计稿：两种配法，择一 ──────────────────
+    # 方式 A (推荐)：在 .env 里贴完整 URL
+    #     FIGMA_DESIGN_URL=https://www.figma.com/design/<key>/Slug?node-id=15480-72
+    # 方式 B (兼容)：分别填
+    #     FIGMA_FILE_KEY=...
+    #     FIGMA_TARGET_NODE_ID=15480:72
+    FIGMA_DESIGN_URL = os.getenv('FIGMA_DESIGN_URL', '').strip()
+
+    _url_file_key: str | None = None
+    _url_node_id: str | None = None
+    if FIGMA_DESIGN_URL:
+        # 延迟 import 避免循环依赖 (config.py -> src.figma_url -> config.Config)
+        from src.figma_url import parse_figma_url as _parse_figma_url
+        _info = _parse_figma_url(FIGMA_DESIGN_URL)
+        _url_file_key = _info.file_key
+        _url_node_id = _info.node_id
+
+    FIGMA_FILE_KEY = os.getenv('FIGMA_FILE_KEY') or _url_file_key
+    FIGMA_TARGET_NODE_ID = (
+        os.getenv('FIGMA_TARGET_NODE_ID', '').replace("-", ":").strip()
+        or (_url_node_id or '')
+    )
     FIGMA_INDEX_MIN_WIDTH = float(os.getenv('FIGMA_INDEX_MIN_WIDTH', '0'))
     BASE_URL = os.getenv('BASE_URL', 'https://example.com')
     SIMILARITY_THRESHOLD = float(os.getenv('SIMILARITY_THRESHOLD', '95'))
@@ -97,7 +117,6 @@ class Config:
     FIGMA_INVENTORY_PATH = REPORTS_DIR / "json" / "figma_inventory.json"
     PAGE_PAIRS_PATH = REPORTS_DIR / "json" / "page_pairs.json"
     TEST_PLAN_PATH = REPORTS_DIR / "json" / "test_plan.json"
-    KNOWLEDGE_PAGE_PAIRS_PATH = KNOWLEDGE_DIR / "page_pairs.json"
 
     # v1.1.0: 多页面爬取配置
     CRAWL_ENABLED = _get_bool.__func__('CRAWL_ENABLED', 'true')
@@ -197,17 +216,12 @@ class Config:
     def setup_directories(cls):
         """确保必备输出目录存在。
 
-        focused_ui_check 现在把所有图片/报告打平放进
-        ``reports/focused_ui_report/``，不再使用 ``reports/images/``
-        和 ``reports/screenshots/figma|web``，所以这里只建共享的
-        JSON 目录和知识库目录，避免留下无用空文件夹。需要写截图的
-        脚本会在写入时按需 mkdir。
+        focused_ui_check 把所有图片/报告打平放进
+        ``reports/focused_ui_report/``，run_orchestrator 则写进
+        ``reports/agent_run/``，所以这里只建共享的 JSON 目录。
+        其他脚本需要写截图时会在写入处按需 mkdir。
         """
-        for directory in [
-            cls.REPORTS_DIR / "json",
-            cls.KNOWLEDGE_DIR,
-        ]:
-            directory.mkdir(parents=True, exist_ok=True)
+        (cls.REPORTS_DIR / "json").mkdir(parents=True, exist_ok=True)
 
 
 # 模块加载时立即从环境变量构建 TEST_PAGES

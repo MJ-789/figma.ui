@@ -1,0 +1,23 @@
+{
+  "_description": "focused_ui_check 要对比的页面清单。短格式最省事: 只填 figma_node + site_path, file_key 和 host 自动从 .env 取。换 .env 立即生效, 不用改本文件。如需跨 Figma 文件对比, 某一条可改用完整的 figma_url/site_url 覆盖默认。",
+  "pages": [
+    {
+      "key": "home",
+      "label": "Home",
+      "figma_node": "15480:75",
+      "site_path": "/"
+    },
+    {
+      "key": "category",
+      "label": "Category",
+      "figma_node": "15480:1305",
+      "site_path": "/list/Pharmaceuticals"
+    },
+    {
+      "key": "details",
+      "label": "Details",
+      "figma_node": "15497:1924",
+      "site_path": "/anti-allergy-medications-scientific-overview-of-types-mechanisms-medical-context"
+    }
+  ]
+}

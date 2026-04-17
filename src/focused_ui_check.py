@@ -16,8 +16,10 @@ Outputs (self-contained so the whole folder can be zipped and mailed):
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +33,7 @@ from src.dom_extractor import DOMExtractor
 from src.element_compare import ElementCompare
 from src.figma_client import FigmaClient
 from src.figma_extractor import FigmaExtractor
+from src.figma_url import parse_figma_url
 from src.function_check import FunctionChecker
 from src.image_compare import ImageCompare
 from src.report_writer import ReportWriter
@@ -44,29 +47,138 @@ except ImportError:  # pragma: no cover
     UTC = timezone.utc
 
 
-FOCUSED_PAGES = [
-    {
-        "key": "home",
-        "label": "Home",
-        "figma_node": "15480:75",
-        "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=15480-75&p=f&m=dev",
-        "site_url": "https://newsdrafte.com/",
-    },
-    {
-        "key": "category",
-        "label": "Category",
-        "figma_node": "15480:1305",
-        "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=15480-1305&p=f&m=dev",
-        "site_url": "https://newsdrafte.com/list/Pharmaceuticals",
-    },
-    {
-        "key": "details",
-        "label": "Details",
-        "figma_node": "15497:1924",
-        "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=15497-1924&p=f&m=dev",
-        "site_url": "https://newsdrafte.com/anti-allergy-medications-scientific-overview-of-types-mechanisms-medical-context",
-    },
-]
+# ──────────────────────────────────────────────────────────────────
+# 页面清单：从 config/focused_pages.json 动态加载
+# ──────────────────────────────────────────────────────────────────
+# 两种配法，JSON 里可任选（同一条里混用也行）:
+#
+#   A) 短格式(推荐): 只写 node_id + 网站相对路径
+#      { "key": "home", "figma_node": "15480:75", "site_path": "/" }
+#      → file_key 取自 .env FIGMA_DESIGN_URL / FIGMA_FILE_KEY
+#      → 站点 host 取自 .env BASE_URL
+#      换 .env 不需要改 JSON, 换一批页面也只改短字段.
+#
+#   B) 完整 URL: 直接贴浏览器链接
+#      { "key": "home", "figma_url": "https://www.figma.com/design/.../?node-id=15480-75",
+#        "site_url": "https://host.com/" }
+#      → node_id / file_key 从 figma_url 解析.
+#
+FOCUSED_PAGES_CONFIG = Config.BASE_DIR / "config" / "focused_pages.json"
+
+
+def _join_site_url(site_path: str) -> str:
+    """把相对 path 拼到 .env BASE_URL 上；已经是绝对 URL 就原样返回."""
+    p = (site_path or "").strip()
+    if not p:
+        return ""
+    if p.startswith(("http://", "https://")):
+        return p
+    base = (Config.BASE_URL or "").rstrip("/")
+    if not p.startswith("/"):
+        p = "/" + p
+    return f"{base}{p}"
+
+
+def _build_figma_url(file_key: Optional[str], node_id: str) -> str:
+    """根据 file_key + node_id 反推一个可点的 Figma URL(纯展示用)."""
+    if not file_key or not node_id:
+        return ""
+    node_param = node_id.replace(":", "-")
+    return f"https://www.figma.com/design/{file_key}/Slug?node-id={node_param}"
+
+
+def _load_focused_pages() -> List[Dict[str, Any]]:
+    """从 JSON 读取页面清单, 短字段自动拼接 .env 里的 host / file_key.
+
+    校验失败时打印清晰错误并退出程序, 避免下游拿到空配置.
+    """
+    if not FOCUSED_PAGES_CONFIG.exists():
+        print(
+            f"[ERROR] 未找到页面配置文件: {FOCUSED_PAGES_CONFIG}\n"
+            f"        需要填入 pages 列表."
+        )
+        sys.exit(1)
+
+    try:
+        raw = json.loads(FOCUSED_PAGES_CONFIG.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] focused_pages.json 解析失败: {e}")
+        sys.exit(1)
+
+    pages_raw = raw.get("pages") or []
+    if not pages_raw:
+        print(f"[ERROR] focused_pages.json 的 pages 列表为空")
+        sys.exit(1)
+
+    env_file_key = (Config.FIGMA_FILE_KEY or "").strip() or None
+
+    pages: List[Dict[str, Any]] = []
+    for idx, p in enumerate(pages_raw):
+        # ── 1) Figma 节点 ─────────────────────────
+        figma_url = (p.get("figma_url") or "").strip()
+        figma_node = (p.get("figma_node") or "").strip().replace("-", ":")
+        file_key: Optional[str] = None
+
+        if figma_url:
+            info = parse_figma_url(figma_url)
+            if not info.ok() or not info.node_id:
+                print(
+                    f"[ERROR] 第 {idx+1} 条 figma_url 无法解析: {figma_url}\n"
+                    f"        请确保 URL 带有 ?node-id=xxxx-yyyy."
+                )
+                sys.exit(1)
+            figma_node = info.node_id
+            file_key = info.file_key
+        else:
+            if not figma_node:
+                print(
+                    f"[ERROR] 第 {idx+1} 条既没有 figma_url 也没有 figma_node, "
+                    f"至少要填一个."
+                )
+                sys.exit(1)
+            file_key = env_file_key
+            if not file_key:
+                print(
+                    f"[ERROR] 第 {idx+1} 条只填了 figma_node, 但 .env 里没设置 "
+                    f"FIGMA_DESIGN_URL / FIGMA_FILE_KEY 作为默认 file_key."
+                )
+                sys.exit(1)
+            figma_url = _build_figma_url(file_key, figma_node)
+
+        # ── 2) 网站 URL ───────────────────────────
+        site_url = (p.get("site_url") or "").strip()
+        site_path = (p.get("site_path") or "").strip()
+        if not site_url:
+            if not site_path:
+                print(
+                    f"[ERROR] 第 {idx+1} 条既没有 site_url 也没有 site_path, "
+                    f"至少要填一个."
+                )
+                sys.exit(1)
+            if not Config.BASE_URL:
+                print(
+                    f"[ERROR] 第 {idx+1} 条用了 site_path, 但 .env 里没设置 BASE_URL."
+                )
+                sys.exit(1)
+            site_url = _join_site_url(site_path)
+
+        key = (p.get("key") or f"page_{idx+1}").strip()
+        label = (p.get("label") or key.title()).strip()
+
+        pages.append(
+            {
+                "key": key,
+                "label": label,
+                "figma_node": figma_node,
+                "figma_file_key": file_key,
+                "figma_url": figma_url,
+                "site_url": site_url,
+            }
+        )
+    return pages
+
+
+FOCUSED_PAGES: List[Dict[str, Any]] = _load_focused_pages()
 
 STABLE_BLOCKS = [
     {
@@ -1154,7 +1266,20 @@ def run() -> Dict[str, Any]:
     _clean_output_dirs()
 
     version = (Config.BASE_DIR / "VERSION").read_text(encoding="utf-8").strip()
-    figma = FigmaClient()
+    # 支持跨 Figma 文件对比: 每个 file_key 对应一个 FigmaClient,按需缓存.
+    figma_clients: Dict[str, FigmaClient] = {}
+
+    def _get_figma(file_key: Optional[str]) -> FigmaClient:
+        key = (file_key or Config.FIGMA_FILE_KEY or "").strip()
+        if not key:
+            raise RuntimeError(
+                "缺少 Figma file_key: 既没在 .env 设置 FIGMA_DESIGN_URL/FIGMA_FILE_KEY, "
+                "也没在 focused_pages.json 的 figma_url 里解析出有效 key."
+            )
+        if key not in figma_clients:
+            figma_clients[key] = FigmaClient(file_key=key)
+        return figma_clients[key]
+
     comparator = ImageCompare(threshold=Config.SIMILARITY_THRESHOLD)
     figma_extractor = FigmaExtractor()
     dom_extractor = DOMExtractor()
@@ -1189,6 +1314,7 @@ def run() -> Dict[str, Any]:
             #    then align the browser viewport to the Figma frame width. This
             #    makes 1 CSS px ≈ 1 Figma design px, so coordinates are directly
             #    comparable and cropped blocks are already at the same scale.
+            figma = _get_figma(page.get("figma_file_key"))
             node_json = figma.get_node_json(page["figma_node"])
             ReportWriter._write_json(Config.REPORTS_DIR / "json" / f"focused_figma_{key}.json", node_json)
             root_box = _node_box(node_json)
