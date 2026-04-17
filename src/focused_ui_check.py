@@ -186,6 +186,7 @@ def _load_focused_pages(
             "figma_url": figma_url,
             "site_url": site_url,
             "figma_scope": (p.get("figma_scope") or "").strip(),
+            "strict_figma_node": bool(p.get("strict_figma_node", False)),
         })
     return pages
 
@@ -1494,6 +1495,7 @@ def _render_html(
     function_agg: Dict[str, Any],
     output_path: Path,
     compare_note_html: str,
+    design_entry_url: str,
 ) -> Path:
     page_rows = []
     # 重点展示用户关心的元素级差异：尺寸 + 颜色 + 字体关键项 + 未匹配。
@@ -1549,6 +1551,59 @@ def _render_html(
 
     function_section_html = _render_function_global_html(function_agg)
 
+    design_rows = []
+    collect_rows = []
+    for page in pages:
+        scope_name = page.get("figma_scope_name", "")
+        scope_id = page.get("figma_scope_id", "")
+        node_hint = f"{scope_name} ({scope_id})" if scope_id else scope_name
+        design_rows.append(
+            f"<tr><td>{page['label']}</td><td><code>{node_hint or '-'}</code></td>"
+            f"<td><code>{_escape_html(page.get('figma_url', ''))}</code></td></tr>"
+        )
+        vp = page.get("viewport", {}) or {}
+        fig = page.get("figma_design", {}) or {}
+        collect_rows.append(
+            f"<tr><td>{page['label']}</td>"
+            f"<td><a href=\"{page['site_url']}\">{page['site_url']}</a></td>"
+            f"<td>{vp.get('width', '-')}</td><td>{vp.get('height', '-')}</td>"
+            f"<td>{fig.get('width', '-')}</td><td>{fig.get('height', '-')}</td></tr>"
+        )
+
+    module_design_html = f"""
+<section class="card">
+  <h2>① 设计稿解析模块</h2>
+  <p class="hint">提取 Figma 节点结构（文字 / 字体 / 颜色 / 尺寸 / 布局）并输出 JSON。</p>
+  <div class="links">
+    <a href="{design_entry_url}">指定设计稿入口（当前生效）</a>
+  </div>
+  <table>
+    <thead><tr><th>页面</th><th>解析到的页面节点</th><th>节点参考链接</th></tr></thead>
+    <tbody>{''.join(design_rows)}</tbody>
+  </table>
+</section>
+"""
+
+    module_collect_html = f"""
+<section class="card">
+  <h2>② 页面采集模块</h2>
+  <p class="hint">自动访问页面，采集 DOM / Computed Style / 全页截图，并对齐设计稿尺寸。</p>
+  <table>
+    <thead><tr><th>页面</th><th>目标网址</th><th>采集视口W</th><th>采集视口H</th><th>设计宽度</th><th>设计高度</th></tr></thead>
+    <tbody>{''.join(collect_rows)}</tbody>
+  </table>
+</section>
+"""
+
+    module_ai_html = f"""
+<section class="card">
+  <h2>③ AI 对比分析模块</h2>
+  <p class="hint">执行 UI 一致性比对（字体/颜色/尺寸/布局）+ 功能检测（链接跳转/流程/异常）。</p>
+  {overview_tables}
+  {function_section_html}
+</section>
+"""
+
     cards = []
     for page in pages:
         pixel = page["pixel"]
@@ -1579,7 +1634,8 @@ def _render_html(
 <section class="card">
   <h2>{page['label']}</h2>
   <div class="links">
-    <a href="{page['figma_url']}">Figma 原型</a>
+    <a href="{design_entry_url}">设计稿入口（指定）</a>
+    <a href="{page['figma_url']}">页面节点参考</a>
     <a href="{page['site_url']}">对比网站</a>
   </div>
   <div class="stats">
@@ -1612,6 +1668,22 @@ def _render_html(
 </section>
 """
         )
+
+    passed_pages = sum(1 for p in pages if p.get("pixel", {}).get("similarity", 0) >= Config.SIMILARITY_THRESHOLD)
+    total_pages = len(pages)
+    module_report_html = f"""
+<section class="card">
+  <h2>④ 报告汇总模块</h2>
+  <p class="hint">面向开发与产品同学的可视化结果，包含差异截图、差异明细、修复建议。</p>
+  <div class="stats">
+    <div><b>对比页面数</b><span>{total_pages}</span></div>
+    <div><b>整页相似度达标页</b><span>{passed_pages}/{total_pages}</span></div>
+    <div><b>设计稿入口</b><span style="font-size:13px;word-break:break-all;">{_escape_html(design_entry_url)}</span></div>
+    <div><b>报告位置</b><span style="font-size:13px;">{_escape_html(str(output_path.parent))}</span></div>
+  </div>
+  {''.join(cards)}
+</section>
+"""
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1667,9 +1739,10 @@ def _render_html(
     <p>多页面视觉 + 元素属性对比 · 生成时间: {datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")}</p>
   </header>
   <div class="wrap">
-    {overview_tables}
-    {function_section_html}
-    {''.join(cards)}
+    {module_design_html}
+    {module_collect_html}
+    {module_ai_html}
+    {module_report_html}
   </div>
 </body>
 </html>"""
@@ -1682,6 +1755,7 @@ def _render_markdown(
     function_agg: Dict[str, Any],
     output_path: Path,
     compare_strategy_cn: str,
+    design_entry_url: str,
 ) -> Path:
     lines = [
         "# Focused UI Summary",
@@ -1698,7 +1772,8 @@ def _render_markdown(
             [
                 f"## {page['label']}",
                 "",
-                f"- Figma: {page['figma_url']}",
+                f"- Figma (指定入口): {design_entry_url}",
+                f"- Figma (页面节点): {page['figma_url']}",
                 f"- Website: {page['site_url']}",
                 f"- Full-page similarity (reference only): {pixel['similarity']:.2f}%",
                 f"- Element overall score: {elem['overall_score']:.2%}",
@@ -1892,7 +1967,11 @@ def run(template: str = "") -> Dict[str, Any]:
             node_json = figma.get_node_json(page["figma_node"])
             ReportWriter._write_json(Config.REPORTS_DIR / "json" / f"focused_figma_{key}.json", node_json)
 
-            scope_node, scope_name = _select_figma_scope_node(node_json, page)
+            if page.get("strict_figma_node"):
+                # 用户明确指定“按当前 node 精确对比”时，禁止再次自动下钻 scope。
+                scope_node, scope_name = node_json, (node_json.get("name") or page["label"])
+            else:
+                scope_node, scope_name = _select_figma_scope_node(node_json, page)
             root_box = _node_box(scope_node) or _node_box(node_json)
             design_w = int(round(root_box[2])) if root_box else Config.AGENT_VIEWPORT_WIDTH
             design_h = int(round(root_box[3])) if root_box else Config.AGENT_VIEWPORT_HEIGHT
@@ -2049,7 +2128,10 @@ def run(template: str = "") -> Dict[str, Any]:
                     "label": page["label"],
                     "figma_url": page["figma_url"],
                     "figma_scope_name": scope_name,
+                    "figma_scope_id": scope_node.get("id", ""),
                     "site_url": page["site_url"],
+                    "viewport": {"width": viewport_w, "height": viewport_h},
+                    "figma_design": {"width": design_w, "height": design_h},
                     "pixel": {
                         "similarity": float(similarity),
                         "figma_path": str(figma_path),
@@ -2101,12 +2183,14 @@ def run(template: str = "") -> Dict[str, Any]:
         function_agg,
         report_dir / "index.html",
         compare_note_html,
+        Config.FIGMA_DESIGN_URL or "",
     )
     md_path = _render_markdown(
         element_pages,
         function_agg,
         report_dir / "summary.md",
         compare_strategy_cn,
+        Config.FIGMA_DESIGN_URL or "",
     )
 
     # Drop the normalization scratch dir once the report is written.

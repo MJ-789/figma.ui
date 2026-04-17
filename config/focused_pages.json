@@ -1,22 +1,25 @@
 {
-  "_description": "严格三页对比：home/category/details。设计文件来自 .env 的 FIGMA_DESIGN_URL；页面对比使用各自 Frame 节点以保证尺寸对齐（14758:1018 属于小标记层，不能直接做整页基准）。",
+  "_description": "严格三页对比：home/category/details。每页绑定精确 Figma 节点 URL，避免自动 scope 误判。",
   "pages": [
     {
       "key": "home",
       "label": "Home",
-      "figma_node": "15480:75",
+      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=14758-990&m=dev",
+      "strict_figma_node": true,
       "site_path": "/"
     },
     {
       "key": "category",
       "label": "Category",
-      "figma_node": "15480:1305",
+      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=14758-1261&m=dev",
+      "strict_figma_node": true,
       "site_path": "/list/Mental Illness"
     },
     {
       "key": "details",
       "label": "Details",
-      "figma_node": "15497:1924",
+      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=14758-1456&m=dev",
+      "strict_figma_node": true,
       "site_path": "/cold-water-swimming-finnish-method-for-mental-calmness"
     }
   ]
