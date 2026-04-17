@@ -123,6 +123,7 @@ class ElementCompare:
         radius_tol: float = 2.0,
         min_match_count: int = 3,
         id_element_map: Optional[Dict[str, str]] = None,
+        skip_props: Optional[set] = None,
     ) -> dict:
         """
         匹配并对比所有 Figma 节点与 DOM 元素。
@@ -195,7 +196,7 @@ class ElementCompare:
                     "properties": {},
                 })
             else:
-                props, score = self._compare_pair(figma_elem, dom_elem, tols)
+                props, score = self._compare_pair(figma_elem, dom_elem, tols, skip_props or set())
                 element_reports.append({
                     "figma_name": figma_elem.name,
                     "figma_id": figma_elem.id,
@@ -205,7 +206,11 @@ class ElementCompare:
                     "passed": score >= threshold,
                     "properties": props,
                 })
-                matched_scores.append(score)
+                # Elements with no applicable (non-skipped) properties don't
+                # contribute to overall_score — otherwise they would silently
+                # count as 100% pass and inflate the number.
+                if props:
+                    matched_scores.append(score)
 
         total_matched = len(matched_scores)
         total_nodes = len(pairs)
@@ -316,6 +321,7 @@ class ElementCompare:
         figma: FigmaElement,
         dom: DOMElement,
         tols: dict,
+        skip_props: Optional[set] = None,
     ) -> Tuple[dict, float]:
         """
         对一对已匹配的元素逐属性对比。
@@ -329,8 +335,16 @@ class ElementCompare:
         total = 0
         passed_count = 0
         is_text = figma.node_type == "TEXT"
+        skip: set = skip_props or set()
 
         def record(key: str, figma_val, web_val, ok: bool, diff=None):
+            # skip_props lets callers drop whole property families from the
+            # comparison (e.g. all typography attrs when the report focuses
+            # purely on visual box metrics). Skipped props do NOT count
+            # toward the pair's score, so they cannot pull overall_score
+            # down.
+            if key in skip:
+                return
             nonlocal total, passed_count
             total += 1
             if ok:
@@ -380,19 +394,20 @@ class ElementCompare:
             diff = round(abs(figma.border_radius - dom.border_radius), 2) if not ok else None
             record("border_radius", figma.border_radius, dom.border_radius, ok, diff)
 
-        # ── 宽高（仅非 TEXT 节点）
-        # TEXT 节点的宽高在 Figma 中是文本包围盒，而 DOM 文字元素（如 <a>、<p>）
-        # 通常是块级布局（全宽），两者尺寸差异极大，比较无意义。
-        if not is_text:
-            if figma.width and dom.width:
-                ok = abs(figma.width - dom.width) <= tols["size"]
-                diff = round(abs(figma.width - dom.width), 2) if not ok else None
-                record("width", figma.width, dom.width, ok, diff)
+        # ── 宽度
+        # 对 TEXT 节点也做宽度比较：它能揭示"文字块是否被换行到
+        # 设计规定的宽度"，是纯视觉/结构性差异，不涉及字体。
+        # 但 height 对 TEXT 仍然跳过（Figma bounding box vs DOM line box
+        # 差异天然很大，比无意义）。
+        if figma.width and dom.width:
+            ok = abs(figma.width - dom.width) <= tols["size"]
+            diff = round(abs(figma.width - dom.width), 2) if not ok else None
+            record("width", figma.width, dom.width, ok, diff)
 
-            if figma.height and dom.height:
-                ok = abs(figma.height - dom.height) <= tols["size"]
-                diff = round(abs(figma.height - dom.height), 2) if not ok else None
-                record("height", figma.height, dom.height, ok, diff)
+        if not is_text and figma.height and dom.height:
+            ok = abs(figma.height - dom.height) <= tols["size"]
+            diff = round(abs(figma.height - dom.height), 2) if not ok else None
+            record("height", figma.height, dom.height, ok, diff)
 
         score = passed_count / total if total > 0 else 1.0
         return props, score

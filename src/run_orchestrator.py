@@ -66,18 +66,28 @@ class RunOrchestrator:
         return FigmaPageIndexer.index(write_report=True)
 
     def _clean_previous_reports(self):
-        """清理上次运行产出的报告和截图，确保结果不残留。"""
+        """清理上次运行产出的报告和截图，确保结果不残留。
+
+        所有截图统一放进 reports/agent_run/（自包含），
+        顺手删掉历史版本留下的空目录，避免 reports/ 下冒出无用文件夹。
+        """
         import shutil
 
-        always_clean = [
+        agent_run_dir = Config.REPORTS_DIR / "agent_run"
+        if agent_run_dir.exists():
+            shutil.rmtree(agent_run_dir, ignore_errors=True)
+        agent_run_dir.mkdir(parents=True, exist_ok=True)
+
+        legacy_dirs = [
             Config.REPORTS_DIR / "images",
             Config.SCREENSHOTS_DIR / "figma",
             Config.SCREENSHOTS_DIR / "web",
             Config.SCREENSHOTS_DIR / "site",
+            Config.SCREENSHOTS_DIR,
         ]
-        for d in always_clean:
+        for d in legacy_dirs:
             if d.exists():
-                shutil.rmtree(d)
+                shutil.rmtree(d, ignore_errors=True)
 
         json_dir = Config.REPORTS_DIR / "json"
         if json_dir.exists():
@@ -188,18 +198,18 @@ class RunOrchestrator:
                 "height": Config.AGENT_VIEWPORT_HEIGHT,
             },
         ) as capture:
-            # Config.setup_directories() no longer creates these on-demand
-            # dirs, so make sure they exist before we write screenshots.
-            (Config.SCREENSHOTS_DIR / "figma").mkdir(parents=True, exist_ok=True)
-            (Config.SCREENSHOTS_DIR / "web").mkdir(parents=True, exist_ok=True)
-            (Config.REPORTS_DIR / "images").mkdir(parents=True, exist_ok=True)
+            # Every agent-run artifact lives in a single self-contained
+            # folder so it can be zipped / sent without the old
+            # screenshots/images subdir jungle.
+            agent_run_dir = Config.REPORTS_DIR / "agent_run"
+            agent_run_dir.mkdir(parents=True, exist_ok=True)
 
             for item in items:
                 name_slug = self._slug(item["figma_name"])
-                figma_path = Config.SCREENSHOTS_DIR / "figma" / f"agent_{name_slug}.png"
-                web_path = Config.SCREENSHOTS_DIR / "web" / f"agent_{name_slug}.png"
-                diff_path = Config.REPORTS_DIR / "images" / f"agent_{name_slug}_diff.png"
-                compare_path = Config.REPORTS_DIR / "images" / f"agent_{name_slug}_compare.png"
+                figma_path = agent_run_dir / f"{name_slug}_figma.png"
+                web_path = agent_run_dir / f"{name_slug}_web.png"
+                diff_path = agent_run_dir / f"{name_slug}_diff.png"
+                compare_path = agent_run_dir / f"{name_slug}_compare.png"
 
                 print(f"\n      [{item['plan_id']}] {item['figma_name']!r} vs {item['site_url']!r}")
 

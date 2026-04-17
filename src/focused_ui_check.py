@@ -101,6 +101,13 @@ STABLE_BLOCKS = [
 
 _NOISE_NAME_RE = re.compile(r"^(image\s+\d+|frame\s*\d*|group\s*\d*)$", re.IGNORECASE)
 
+# Typography properties are intentionally skipped for this report: the user
+# wants a purely visual/structural comparison (image size, width/height, box
+# colors, radius) — font families and sizes already diverge heavily between
+# Figma's rendering engine and real browsers and add noise rather than
+# actionable info here.
+_SKIP_PROPS = {"font_family", "font_size", "font_weight", "line_height", "text_color"}
+
 
 # Self-contained report folder. Every artifact the user needs to view the
 # report (HTML + screenshots + markdown) lives inside this one folder so
@@ -162,22 +169,18 @@ def _clean_output_dirs() -> None:
                 pass
 
     # 4) Drop deprecated sibling directories. They used to hold screenshots
-    #    / diff images that are now bundled inside FOCUSED_REPORT_DIR.
+    #    / diff images that are now bundled inside FOCUSED_REPORT_DIR, and
+    #    other scripts (run_orchestrator) may still create them if run.
     for legacy_dir in [
         Config.REPORTS_DIR / "html",
         Config.REPORTS_DIR / "images",
         Config.SCREENSHOTS_DIR / "figma",
         Config.SCREENSHOTS_DIR / "web",
         Config.SCREENSHOTS_DIR / "site",
+        Config.SCREENSHOTS_DIR,  # the now-unused root itself
     ]:
         if legacy_dir.exists():
             shutil.rmtree(legacy_dir, ignore_errors=True)
-    # Remove the now-empty screenshots root if nothing else is using it.
-    try:
-        if Config.SCREENSHOTS_DIR.exists() and not any(Config.SCREENSHOTS_DIR.iterdir()):
-            Config.SCREENSHOTS_DIR.rmdir()
-    except OSError:
-        pass
 
 
 def _iter_nodes(root: Dict[str, Any], max_depth: int = -1) -> List[Tuple[int, Dict[str, Any]]]:
@@ -344,6 +347,38 @@ def _crop_by_ratio_from_image(img_path: Path, ratio: List[float], output_path: P
     return output_path
 
 
+def _crop_web_by_figma_coords(
+    full_web_path: Path,
+    root_box: Tuple[float, float, float, float],
+    abs_box: Tuple[float, float, float, float],
+    output_path: Path,
+) -> Optional[Tuple[float, float, float, float]]:
+    """Crop the web full-page screenshot using the Figma layer's bbox.
+
+    Because the Playwright viewport width is already aligned with the Figma
+    root frame width, 1 CSS px ≈ 1 Figma px. So we can map the Figma layer's
+    absolute box directly to page coordinates on the web screenshot. This
+    guarantees Figma block and Web block cover the *same visual region*,
+    even when the site's DOM structure disagrees with the design's layer
+    groupings (e.g., Figma Hero = 4 cards, Web uses 2 separate <section>s).
+    """
+    try:
+        img = Image.open(full_web_path)
+    except Exception:
+        return None
+    rx, ry, _, _ = root_box
+    x, y, w, h = abs_box
+    left = int(max(0, x - rx))
+    top = int(max(0, y - ry))
+    right = int(min(img.width, left + w))
+    bottom = int(min(img.height, top + h))
+    if right <= left or bottom <= top:
+        return None
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img.crop((left, top, right, bottom)).save(output_path)
+    return (float(left), float(top), float(right - left), float(bottom - top))
+
+
 def _crop_web_block_from_full(
     page,
     selectors: List[str],
@@ -352,11 +387,11 @@ def _crop_web_block_from_full(
 ) -> Optional[Tuple[float, float, float, float]]:
     """Locate a DOM element and crop it out of the full-page web screenshot.
 
-    We deliberately avoid ``locator.screenshot()`` here: taking an element-only
-    screenshot forces Playwright to scroll the element into view, which can
-    re-lay out sticky headers and produce visuals that do NOT match the
-    coordinate system of the full-page image. Cropping from the full image
-    keeps the web block in the same coordinate frame as the Figma design.
+    Used as a fallback when Figma does not provide a usable layer for the
+    block. We deliberately avoid ``locator.screenshot()`` because an
+    element-only screenshot forces Playwright to scroll the element into
+    view, which re-lays out sticky headers and produces visuals that do NOT
+    match the coordinate system of the full-page image.
 
     Returns the page-absolute bounding box (x, y, w, h) in CSS px, or None.
     """
@@ -809,7 +844,9 @@ def _render_function_global_html(agg: Dict[str, Any]) -> str:
 
 def _render_html(pages: List[Dict[str, Any]], function_agg: Dict[str, Any], output_path: Path) -> Path:
     page_rows = []
-    issue_keys = ["text_color", "fill_color", "font_family", "font_size", "font_weight", "line_height", "border_radius", "width", "height", "unmatched"]
+    # Visual/structural issues only — typography properties are skipped at
+    # the compare layer (see _SKIP_PROPS).
+    issue_keys = ["fill_color", "border_radius", "width", "height", "unmatched"]
     issue_header = "".join(f"<th>{k}</th>" for k in issue_keys)
     issue_rows = []
     block_header = "".join(f"<th>{b['label']}</th>" for b in STABLE_BLOCKS)
@@ -1226,39 +1263,27 @@ def run() -> Dict[str, Any]:
                 else:
                     _crop_by_ratio_from_image(figma_path, block["fallback_ratio"], fig_block_path)
 
-                # --- Web side: prefer DOM-selector rect, but guard against
-                #     selectors that grab way more than the Figma block (e.g.
-                #     `main` returning the entire article area). When the
-                #     candidate is > 2.2x taller than the Figma block, fall
-                #     back to an exact coordinate crop based on the Figma
-                #     layer -- viewport width already matches the design, so
-                #     Figma page px ≈ web page px.
-                web_rect = _crop_web_block_from_full(
-                    capture.page, block["web_selectors"], web_path, web_block_path
-                )
-                if web_rect and abs_box:
-                    fig_h = abs_box[3]
-                    if fig_h > 0 and web_rect[3] > fig_h * 2.2:
-                        web_rect = None
+                # --- Web side: prefer cropping by the SAME Figma bbox on the
+                # web full-page screenshot. Viewport width is aligned with the
+                # design, so Figma page px ≈ web page px. This locks both
+                # sides to the identical visual region, avoiding the class of
+                # bugs where Figma layer "Hero" = 4 cards but web's
+                # ``main section:first-of-type`` = only 2 cards.
+                web_rect: Optional[Tuple[float, float, float, float]] = None
+                if abs_box and root_box:
+                    web_rect = _crop_web_by_figma_coords(
+                        web_path, root_box, abs_box, web_block_path
+                    )
 
-                if (not web_rect) and abs_box and root_box:
-                    try:
-                        web_img = Image.open(web_path)
-                        rx_off, ry_off = root_box[0], root_box[1]
-                        px = int(max(0, abs_box[0] - rx_off))
-                        py = int(max(0, abs_box[1] - ry_off))
-                        pw = int(abs_box[2])
-                        ph = int(abs_box[3])
-                        right = int(min(web_img.width, px + pw))
-                        bottom = int(min(web_img.height, py + ph))
-                        if right > px and bottom > py:
-                            web_block_path.parent.mkdir(parents=True, exist_ok=True)
-                            web_img.crop((px, py, right, bottom)).save(web_block_path)
-                            web_rect = (float(px), float(py), float(right - px), float(bottom - py))
-                    except Exception:
-                        pass
+                # Fallback 1: DOM-selector crop (only when we could NOT
+                # identify a Figma layer to drive the crop).
+                if web_rect is None:
+                    web_rect = _crop_web_block_from_full(
+                        capture.page, block["web_selectors"], web_path, web_block_path
+                    )
 
-                if not web_rect:
+                # Fallback 2: ratio slice of the full web page.
+                if web_rect is None:
                     _crop_by_ratio_from_image(web_path, block["fallback_ratio"], web_block_path)
 
                 # --- Normalize to the SAME canvas (aspect preserving) before pixel diff.
@@ -1312,6 +1337,7 @@ def run() -> Dict[str, Any]:
                 font_size_tol=Config.COMPARE_FONT_SIZE_TOLERANCE,
                 radius_tol=Config.COMPARE_RADIUS_TOLERANCE,
                 min_match_count=Config.COMPARE_MIN_MATCH_COUNT,
+                skip_props=_SKIP_PROPS,
             )
 
             element_payload = {
