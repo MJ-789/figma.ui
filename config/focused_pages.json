@@ -1,20 +1,23 @@
 {
-  "_": "填写 figma_node → 自动运行该模板；留空/删除 figma_node → 跳过；同一节点多页面时可给每页加 figma_scope（如 home/category/details）",
-
-  "games": {
-    "figma_node": "16000:13788",
-    "pages": [
-      { "key": "home",     "label": "首页",     "path": "/",                      "figma_scope": "home" },
-      { "key": "category", "label": "游戏分类", "path": "/games/trial-bike",      "figma_scope": "category" },
-      { "key": "detail",   "label": "游戏详情", "path": "/games/trial-bike/play", "figma_scope": "details" }
-    ]
-  },
-
-  "news": {
-    "figma_node": "",
-    "pages": [
-      { "key": "list",   "label": "资讯列表", "path": "/tricks" },
-      { "key": "detail", "label": "资讯详情", "path": "/tricks/your-article-slug" }
-    ]
-  }
+  "_description": "严格三页对比：home/category/details。设计文件来自 .env 的 FIGMA_DESIGN_URL；页面对比使用各自 Frame 节点以保证尺寸对齐（14758:1018 属于小标记层，不能直接做整页基准）。",
+  "pages": [
+    {
+      "key": "home",
+      "label": "Home",
+      "figma_node": "15480:75",
+      "site_path": "/"
+    },
+    {
+      "key": "category",
+      "label": "Category",
+      "figma_node": "15480:1305",
+      "site_path": "/list/Mental Illness"
+    },
+    {
+      "key": "details",
+      "label": "Details",
+      "figma_node": "15497:1924",
+      "site_path": "/cold-water-swimming-finnish-method-for-mental-calmness"
+    }
+  ]
 }

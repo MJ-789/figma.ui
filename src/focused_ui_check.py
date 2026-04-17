@@ -25,8 +25,10 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None  # 资讯长页面截图可能非常大，避免 PIL 误判为炸弹图而中断
 
 from config.config import Config
 from src.auto_mapper import AutoMapper
@@ -81,6 +83,7 @@ def _join_site_url(site_path: str) -> str:
     base = (Config.BASE_URL or "").rstrip("/")
     if not p.startswith("/"):
         p = "/" + p
+    p = quote(p, safe="/%")
     return f"{base}{p}"
 
 
@@ -331,13 +334,11 @@ GAMES_STABLE_BLOCKS = [
 
 _NOISE_NAME_RE = re.compile(r"^(image\s+\d+|frame\s*\d*|group\s*\d*)$", re.IGNORECASE)
 
-# 默认（非 games）字体排版属性跳过：
-#   Figma 的字体渲染引擎（Figma Desktop / Web）与浏览器（Chrome/Safari）
-#   在字距、行高、字重映射上存在系统性偏差，直接对比会产生大量误报。
-#   本模式聚焦"视觉结构"（尺寸/布局/颜色/圆角），字体问题请用像素截图差异图辅助人工判断。
-_SKIP_PROPS = {"font_family", "font_size", "font_weight", "line_height", "text_color"}
+# 默认（非 games）仅跳过“行高”：
+#   用户要求不考虑文字行高（动态变化大）。文本内容本身也不参与属性评分。
+_SKIP_PROPS = {"line_height"}
 # 用于报告展示（中文名称）
-_SKIP_PROPS_LABELS = ["字体", "字号", "字重", "行高", "文字色"]
+_SKIP_PROPS_LABELS = ["行高"]
 
 # games 模板要求：字体问题不能忽略 → 不跳过任何字体属性。
 _SKIP_PROPS_GAMES = set()
@@ -351,37 +352,34 @@ FOCUSED_REPORT_DIR = Config.REPORTS_DIR / "focused_ui_report"
 
 
 def _resolve_compare_profile(template: str) -> Dict[str, Any]:
-    """Resolve block strategy + property compare policy by template."""
+    """Resolve property compare policy by template."""
     tmpl = (template or "").strip().lower()
     if tmpl == "games":
         return {
             "name": "games",
-            "blocks": GAMES_STABLE_BLOCKS,
             "skip_props": _SKIP_PROPS_GAMES,
             "skip_prop_labels": _SKIP_PROPS_LABELS_GAMES,
             "strategy_cn": (
-                "games 模板启用专用稳定结构块（页面标记区、顶栏导航区、搜索条区、游戏列表区、"
-                "底部/侧边互动区），并开启字体属性对比（不忽略字体、字号、字重、行高、文字色）。"
+                "games 模板已移除稳定结构块分段，仅做整页截图对比；"
+                "元素级对比覆盖尺寸、字体、字号、字重、行高、文字色、填充色、圆角。"
             ),
             "html_note": (
                 "✅ <b>已启用字体属性对比</b>（字体 / 字号 / 字重 / 行高 / 文字色）。"
-                "说明：games 模板按实际业务要求，不再跳过字体相关属性。"
+                "并且已移除稳定结构块分段，当前报告以整页截图对比 + 元素级差异为主。"
             ),
         }
     return {
         "name": "generic",
-        "blocks": GENERIC_STABLE_BLOCKS,
         "skip_props": _SKIP_PROPS,
         "skip_prop_labels": _SKIP_PROPS_LABELS,
         "strategy_cn": (
-            "通用模板使用 Header/Hero/Content/Footer 稳定块，并默认跳过字体类属性，"
-            "避免 Figma 与浏览器渲染差异造成系统性误报。"
+            "当前模式已移除稳定结构块分段，采用整页截图对比；"
+            "元素级对比覆盖尺寸、颜色、圆角与必要字体属性。"
+            "不比较文字内容与行高（动态波动项）。"
         ),
         "html_note": (
-            "ℹ️ <b>已跳过字体属性对比</b>（"
-            + ", ".join(_SKIP_PROPS_LABELS)
-            + "）：Figma 渲染引擎与浏览器存在系统性字体差异，"
-            "直接对比噪音多于信号。字体问题请结合像素差异图判断。"
+            "✅ <b>已忽略动态文本项</b>：文字内容与行高不纳入元素评分。"
+            "当前报告为整页截图对比 + 元素级差异。"
         ),
     }
 
@@ -877,6 +875,135 @@ def _goto_page_robust(page, url: str, timeout_ms: int = 30000) -> None:
             raise
 
 
+def _normalize_abs_url(url: str) -> str:
+    """Normalize URL for stable equality checks."""
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if "#" in u:
+        u = u.split("#", 1)[0]
+    if u.endswith("/"):
+        u = u[:-1]
+    return u
+
+
+def _click_or_goto_target(page, target_url: str, timeout_ms: int = 12000) -> Tuple[str, str]:
+    """Try click-based navigation first; fallback to direct goto.
+
+    Returns:
+        (method, error)
+        method: "click" | "goto"
+    """
+    target_norm = _normalize_abs_url(target_url)
+    try:
+        idx = page.evaluate(
+            """
+            (target) => {
+              const normalize = (u) => {
+                try {
+                  const x = new URL(u, window.location.href);
+                  x.hash = "";
+                  let s = x.href;
+                  if (s.endsWith("/")) s = s.slice(0, -1);
+                  return s;
+                } catch (_) {
+                  return "";
+                }
+              };
+              const targetNorm = normalize(target);
+              const links = Array.from(document.querySelectorAll("a[href]"));
+              for (let i = 0; i < links.length; i++) {
+                const a = links[i];
+                const r = a.getBoundingClientRect();
+                if (r.width < 4 || r.height < 4) continue;
+                if (a.offsetParent === null) continue;
+                if (normalize(a.href) === targetNorm) return i;
+              }
+              return -1;
+            }
+            """,
+            target_url,
+        )
+        if isinstance(idx, int) and idx >= 0:
+            loc = page.locator("a[href]").nth(idx)
+            if loc.count() > 0:
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=timeout_ms):
+                    loc.click(timeout=2500)
+                page.wait_for_timeout(500)
+                cur = _normalize_abs_url(page.url)
+                if cur == target_norm or cur.startswith(target_norm):
+                    return "click", ""
+    except Exception as exc:
+        click_err = f"{type(exc).__name__}: {exc}"
+    else:
+        click_err = "no matching visible link"
+
+    try:
+        _goto_page_robust(page, target_url, timeout_ms=timeout_ms)
+        return "goto", click_err
+    except Exception as exc:
+        return "goto", f"{click_err}; goto failed: {type(exc).__name__}: {exc}"
+
+
+def _run_navigation_flows(page, pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Run deterministic route-combo validation:
+    home -> category -> detail -> home/category
+    """
+    by_key = {str(p.get("key", "")).strip().lower(): p for p in pages}
+    home = by_key.get("home")
+    category = by_key.get("category")
+    detail = by_key.get("detail") or by_key.get("details")
+    if not (home and category and detail):
+        return [{
+            "name": "组合流程验证",
+            "status": "skipped",
+            "error": "缺少 home/category/detail 页面配置，无法执行组合流程验证。",
+            "steps": [],
+        }]
+
+    flows_def = [
+        ("流程A: 首页→分类→详情→回首页", [home, category, detail, home]),
+        ("流程B: 首页→分类→详情→回分类", [home, category, detail, category]),
+    ]
+    results: List[Dict[str, Any]] = []
+
+    for flow_name, seq in flows_def:
+        steps: List[Dict[str, Any]] = []
+        ok = True
+        err = ""
+        for i in range(len(seq) - 1):
+            src = seq[i]
+            dst = seq[i + 1]
+            dst_url = dst["site_url"]
+            from_url = page.url
+            method, method_err = _click_or_goto_target(page, dst_url, timeout_ms=15000)
+            cur = _normalize_abs_url(page.url)
+            expected = _normalize_abs_url(dst_url)
+            step_ok = cur == expected or cur.startswith(expected)
+            steps.append({
+                "step": i + 1,
+                "from_label": src.get("label", ""),
+                "to_label": dst.get("label", ""),
+                "from_url": from_url,
+                "to_url": page.url,
+                "expected_url": dst_url,
+                "method": method,
+                "ok": step_ok,
+                "error": method_err if not step_ok else "",
+            })
+            if not step_ok:
+                ok = False
+                err = steps[-1]["error"] or f"未到达预期URL: {dst_url}"
+                break
+        results.append({
+            "name": flow_name,
+            "status": "ok" if ok else "failed",
+            "error": err,
+            "steps": steps,
+        })
+    return results
+
+
 def _normalize_pair_for_compare(
     img1_path: Path,
     img2_path: Path,
@@ -1066,7 +1193,7 @@ def _escape_html(value: Any) -> str:
     )
 
 
-def _aggregate_function_checks(pages: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _aggregate_function_checks(pages: List[Dict[str, Any]], flows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Merge per-page function check results into a single dedup'd view.
 
     - Links are deduplicated by URL. Header/footer links that appear on every
@@ -1134,9 +1261,13 @@ def _aggregate_function_checks(pages: List[Dict[str, Any]]) -> Dict[str, Any]:
     buttons_failed = sum(1 for b in buttons if b.get("status") in button_failed_statuses)
     links_failed = sum(1 for l in links if not l.get("ok"))
 
+    flow_items = flows or []
+    flow_failed = sum(1 for f in flow_items if f.get("status") != "ok")
+
     return {
         "links": links,
         "buttons": buttons,
+        "flows": flow_items,
         "console_errors": console_errors,
         "page_errors": page_errors,
         "failed_requests": failed_requests,
@@ -1148,6 +1279,9 @@ def _aggregate_function_checks(pages: List[Dict[str, Any]]) -> Dict[str, Any]:
             "buttons_tested": len(buttons),
             "buttons_failed": buttons_failed,
             "button_pass_rate": (1 - buttons_failed / len(buttons)) * 100 if buttons else 0.0,
+            "flows_total": len(flow_items),
+            "flows_failed": flow_failed,
+            "flow_pass_rate": (1 - flow_failed / len(flow_items)) * 100 if flow_items else 0.0,
             "console_errors": len(console_errors),
             "page_errors": len(page_errors),
             "failed_requests": len(failed_requests),
@@ -1171,6 +1305,7 @@ def _render_function_global_html(agg: Dict[str, Any]) -> str:
     summary = agg.get("summary", {})
     links = agg.get("links", []) or []
     buttons = agg.get("buttons", []) or []
+    flows = agg.get("flows", []) or []
     console_errors = agg.get("console_errors", []) or []
     page_errors = agg.get("page_errors", []) or []
     failed_reqs = agg.get("failed_requests", []) or []
@@ -1252,6 +1387,32 @@ def _render_function_global_html(agg: Dict[str, Any]) -> str:
 
     link_rate = f"{summary.get('link_pass_rate', 0):.1f}%" if summary.get("unique_links") else "—"
     btn_rate = f"{summary.get('button_pass_rate', 0):.1f}%" if summary.get("buttons_tested") else "—"
+    flow_rate = f"{summary.get('flow_pass_rate', 0):.1f}%" if summary.get("flows_total") else "—"
+
+    flow_rows = []
+    for flow in flows:
+        flow_name = _escape_html(flow.get("name", ""))
+        status = flow.get("status", "")
+        cls = "ok" if status == "ok" else ("muted" if status == "skipped" else "fail")
+        steps = flow.get("steps", []) or []
+        if steps:
+            step_desc = " → ".join(
+                f"{_escape_html(s.get('from_label', ''))}→{_escape_html(s.get('to_label', ''))}"
+                f"({_escape_html(s.get('method', ''))})"
+                for s in steps
+            )
+        else:
+            step_desc = "—"
+        flow_rows.append(
+            "<tr>"
+            f"<td>{flow_name}</td>"
+            f"<td>{step_desc}</td>"
+            f"<td class='{cls}'>{_escape_html(status)}</td>"
+            f"<td>{_escape_html(flow.get('error', ''))}</td>"
+            "</tr>"
+        )
+    if not flow_rows:
+        flow_rows.append("<tr><td colspan='4' class='empty'>未配置组合流程验证</td></tr>")
 
     return f"""
 <section class="card">
@@ -1262,6 +1423,7 @@ def _render_function_global_html(agg: Dict[str, Any]) -> str:
     <div><b>链接失败 / 通过率</b><span>{summary.get('unique_links_failed', 0)} · {link_rate}</span></div>
     <div><b>按钮点击次数</b><span>{summary.get('buttons_tested', 0)}</span></div>
     <div><b>按钮失败 / 通过率</b><span>{summary.get('buttons_failed', 0)} · {btn_rate}</span></div>
+    <div><b>组合流程 / 通过率</b><span>{summary.get('flows_total', 0)} · {flow_rate}</span></div>
     <div><b>Console 错误</b><span>{summary.get('console_errors', 0)}</span></div>
     <div><b>Page 错误</b><span>{summary.get('page_errors', 0)}</span></div>
     <div><b>4xx/5xx 请求</b><span>{summary.get('failed_requests', 0)}</span></div>
@@ -1281,6 +1443,13 @@ def _render_function_global_html(agg: Dict[str, Any]) -> str:
       <tr><th>页面</th><th>按钮文案</th><th>状态</th><th>详情</th></tr>
     </thead>
     <tbody>{''.join(button_rows)}</tbody>
+  </table>
+  <h3>组合流程验证（首页→分类→详情→回首页/回分类）</h3>
+  <table>
+    <thead>
+      <tr><th>流程</th><th>步骤（含动作）</th><th>结果</th><th>备注</th></tr>
+    </thead>
+    <tbody>{''.join(flow_rows)}</tbody>
   </table>
   <h3>异常记录（Console / PageError / 4xx-5xx 请求）</h3>
   {errors_html}
@@ -1324,33 +1493,33 @@ def _render_html(
     pages: List[Dict[str, Any]],
     function_agg: Dict[str, Any],
     output_path: Path,
-    stable_blocks: List[Dict[str, Any]],
     compare_note_html: str,
 ) -> Path:
     page_rows = []
-    issue_keys = ["fill_color", "border_radius", "width", "height", "unmatched"]
+    # 重点展示用户关心的元素级差异：尺寸 + 颜色 + 字体关键项 + 未匹配。
+    issue_keys = [
+        "width",
+        "height",
+        "font_size",
+        "font_weight",
+        "text_color",
+        "fill_color",
+        "border_radius",
+        "unmatched",
+    ]
     issue_header = "".join(f"<th>{k}</th>" for k in issue_keys)
     issue_rows = []
-    block_header = "".join(f"<th>{b['label']}</th>" for b in stable_blocks)
-    block_rows = []
     for page in pages:
         elem = page["element"]
         issue_count = _issue_counts(page["top_diffs"])
         page_rows.append(
-            f"<tr><td>{page['label']}</td><td>{page['pixel']['similarity']:.2f}%</td><td>{page['block_avg_similarity']:.2f}%</td>"
+            f"<tr><td>{page['label']}</td><td>{page['pixel']['similarity']:.2f}%</td>"
             f"<td>{elem['overall_score']:.2%}</td><td>{elem['coverage_rate']:.2%}</td><td>{elem['total_matched']}</td><td>{elem['total_unmatched']}</td></tr>"
         )
         issue_rows.append(
             "<tr>"
             f"<td>{page['label']}</td>"
             + "".join(f"<td>{issue_count.get(k, 0)}</td>" for k in issue_keys)
-            + "</tr>"
-        )
-        block_map = {b["key"]: b["similarity"] for b in page["blocks"]}
-        block_rows.append(
-            "<tr>"
-            f"<td>{page['label']}</td>"
-            + "".join(f"<td>{block_map.get(b['key'], 0.0):.2f}%</td>" for b in stable_blocks)
             + "</tr>"
         )
 
@@ -1360,22 +1529,13 @@ def _render_html(
   <h3>页面指标总览</h3>
   <table>
     <thead>
-      <tr><th>页面</th><th>整页相似度</th><th>结构块平均相似度</th><th>元素得分</th><th>元素覆盖率</th><th>匹配元素</th><th>未匹配元素</th></tr>
+      <tr><th>页面</th><th>整页相似度</th><th>元素得分</th><th>元素覆盖率</th><th>匹配元素</th><th>未匹配元素</th></tr>
     </thead>
     <tbody>
       {''.join(page_rows)}
     </tbody>
   </table>
-  <h3>结构块相似度矩阵</h3>
-  <table>
-    <thead>
-      <tr><th>页面</th>{block_header}</tr>
-    </thead>
-    <tbody>
-      {''.join(block_rows)}
-    </tbody>
-  </table>
-  <h3>差异项频次矩阵（Top Diffs）</h3>
+  <h3>元素差异频次矩阵（Top Diffs）</h3>
   <table>
     <thead>
       <tr><th>页面</th>{issue_header}</tr>
@@ -1393,7 +1553,6 @@ def _render_html(
     for page in pages:
         pixel = page["pixel"]
         elem = page["element"]
-        block_results = page["blocks"]
         suggestions = _build_dev_suggestions(page["top_diffs"])
 
         diff_rows = []
@@ -1415,27 +1574,6 @@ def _render_html(
         if not diff_rows:
             diff_rows.append("<tr><td colspan='4'>No visual property differences captured in top list.</td></tr>")
 
-        block_cards = []
-        for block in block_results:
-            fig_sz = block.get("figma_size", {})
-            web_sz = block.get("web_size", {})
-            fig_dim = f"{fig_sz.get('width','?')}×{fig_sz.get('height','?')}"
-            web_dim = f"{web_sz.get('width','?')}×{web_sz.get('height','?')}"
-            layer = block.get("figma_layer_name", "") or "—"
-            block_cards.append(
-                f"""
-<div class="block-card">
-  <div class="block-title">{block['label']} · 相似度 {block['similarity']:.2f}%</div>
-  <div class="block-meta">Figma 图层: <code>{layer}</code> · Figma 尺寸: {fig_dim} · Web 尺寸: {web_dim}</div>
-  <div class="img-grid block-grid">
-    <div><div class="lbl">Figma</div><img src="{_img_src(block['figma_path'])}" /></div>
-    <div><div class="lbl">Website</div><img src="{_img_src(block['web_path'])}" /></div>
-    <div><div class="lbl">Diff</div><img src="{_img_src(block['diff_path'])}" /></div>
-  </div>
-</div>
-"""
-            )
-
         cards.append(
             f"""
 <section class="card">
@@ -1446,12 +1584,11 @@ def _render_html(
   </div>
   <div class="stats">
     <div><b>整页相似度(仅参考)</b><span>{pixel['similarity']:.2f}%</span></div>
-    <div><b>结构块平均相似度</b><span>{page['block_avg_similarity']:.2f}%</span></div>
-    <div><b>元素得分(结构块内)</b><span>{elem['overall_score']:.2%}</span></div>
-    <div><b>元素覆盖率(结构块内)</b><span>{elem['coverage_rate']:.2%}</span></div>
+    <div><b>元素得分</b><span>{elem['overall_score']:.2%}</span></div>
+    <div><b>元素覆盖率</b><span>{elem['coverage_rate']:.2%}</span></div>
+    <div><b>匹配/未匹配</b><span>{elem['total_matched']}/{elem['total_unmatched']}</span></div>
   </div>
-  <h3>稳定结构块对比（核心）</h3>
-  {''.join(block_cards)}
+  <h3>整页截图对比（核心）</h3>
   <h3>开发修复建议</h3>
   <ul>{"".join(f"<li>{s}</li>" for s in suggestions) if suggestions else "<li>暂无建议</li>"}</ul>
   <div class="img-grid">
@@ -1564,17 +1701,12 @@ def _render_markdown(
                 f"- Figma: {page['figma_url']}",
                 f"- Website: {page['site_url']}",
                 f"- Full-page similarity (reference only): {pixel['similarity']:.2f}%",
-                f"- Stable-block average similarity (primary): {page['block_avg_similarity']:.2f}%",
-                f"- Element overall score (inside stable blocks): {elem['overall_score']:.2%}",
-                f"- Element coverage (inside stable blocks): {elem['coverage_rate']:.2%}",
+                f"- Element overall score: {elem['overall_score']:.2%}",
+                f"- Element coverage: {elem['coverage_rate']:.2%}",
                 f"- Matched elements: {elem['total_matched']}",
                 f"- Unmatched elements: {elem['total_unmatched']}",
-                "",
-                "Stable block results:",
             ]
         )
-        for block in page["blocks"]:
-            lines.append(f"- `{block['label']}` similarity: {block['similarity']:.2f}%")
         lines.append("")
         lines.append("Top differences:")
         if page["top_diffs"]:
@@ -1609,6 +1741,11 @@ def _render_markdown(
         f"pass rate: {summary.get('button_pass_rate', 0):.1f}%"
     )
     lines.append(
+        f"- Flow combos: {summary.get('flows_total', 0)}, "
+        f"failed: {summary.get('flows_failed', 0)}, "
+        f"pass rate: {summary.get('flow_pass_rate', 0):.1f}%"
+    )
+    lines.append(
         f"- Console errors: {summary.get('console_errors', 0)}, "
         f"page errors: {summary.get('page_errors', 0)}, "
         f"failed requests: {summary.get('failed_requests', 0)}"
@@ -1636,6 +1773,20 @@ def _render_markdown(
                 f"- [{b.get('page','')}] `{(b.get('text') or '').strip()[:40]}` "
                 f"[{b.get('status','')}] {b.get('error','')}"
             )
+    flows = function_agg.get("flows") or []
+    if flows:
+        lines.append("")
+        lines.append("## 组合流程验证（首页→分类→详情→回首页/回分类）")
+        lines.append("")
+        for flow in flows:
+            lines.append(f"- {flow.get('name','')}: {flow.get('status','')}")
+            for st in flow.get("steps", []) or []:
+                lines.append(
+                    f"  - Step {st.get('step')}: {st.get('from_label','')} -> {st.get('to_label','')} "
+                    f"[{st.get('method','')}] {'OK' if st.get('ok') else 'FAIL'}"
+                )
+            if flow.get("error"):
+                lines.append(f"  - error: {flow.get('error')}")
     lines.append("")
 
     _safe_write_text(output_path, "\n".join(lines))
@@ -1683,7 +1834,6 @@ def run(template: str = "") -> Dict[str, Any]:
     pages = _load_focused_pages(FOCUSED_PAGES_CONFIG, template_filter=_tmpl or None)
     _clean_output_dirs(report_dir)
     profile = _resolve_compare_profile(_tmpl)
-    stable_blocks = profile["blocks"]
     skip_props = profile["skip_props"]
     skip_prop_labels = profile["skip_prop_labels"]
     compare_strategy_cn = profile["strategy_cn"]
@@ -1712,6 +1862,7 @@ def run(template: str = "") -> Dict[str, Any]:
 
     page_results: List[Dict[str, Any]] = []
     element_pages: List[Dict[str, Any]] = []
+    navigation_flows: List[Dict[str, Any]] = []
 
     # Normalization scratch files (same-size copies used only for pixel diff)
     # live in a temp dir so they never pollute reports/screenshots/.
@@ -1804,92 +1955,16 @@ def run(template: str = "") -> Dict[str, Any]:
                     "status": "ok",
                 }
             )
-            figma_block_abs_boxes: List[Tuple[float, float, float, float]] = []
-            block_results = []
-            for block in stable_blocks:
-                bkey = block["key"]
-                fig_block_path = report_dir / f"{key}_{bkey}_figma.png"
-                web_block_path = report_dir / f"{key}_{bkey}_web.png"
-                diff_block_path = report_dir / f"{key}_{bkey}_diff.png"
-
-                # --- Figma side: crop the exact layer bbox when we can identify it.
-                node_for_block = _pick_figma_block_node(scope_node, block)
-                abs_box: Optional[Tuple[float, float, float, float]] = None
-                figma_layer_name = ""
-                if node_for_block and root_box:
-                    abs_box = _node_box(node_for_block)
-                    figma_layer_name = node_for_block.get("name", "")
-                    _crop_from_figma_image(figma_path, root_box, abs_box, fig_block_path)
-                    figma_block_abs_boxes.append(abs_box)
-                elif root_box:
-                    abs_box = _ratio_to_abs_box(root_box, block["fallback_ratio"])
-                    figma_layer_name = "(ratio fallback)"
-                    _crop_from_figma_image(figma_path, root_box, abs_box, fig_block_path)
-                    figma_block_abs_boxes.append(abs_box)
-                else:
-                    _crop_by_ratio_from_image(figma_path, block["fallback_ratio"], fig_block_path)
-
-                # --- Web side: prefer cropping by the SAME Figma bbox on the
-                # web full-page screenshot. Viewport width is aligned with the
-                # design, so Figma page px ≈ web page px. This locks both
-                # sides to the identical visual region, avoiding the class of
-                # bugs where Figma layer "Hero" = 4 cards but web's
-                # ``main section:first-of-type`` = only 2 cards.
-                web_rect: Optional[Tuple[float, float, float, float]] = None
-                if abs_box and root_box:
-                    web_rect = _crop_web_by_figma_coords(
-                        web_path, root_box, abs_box, web_block_path
-                    )
-
-                # Fallback 1: DOM-selector crop (only when we could NOT
-                # identify a Figma layer to drive the crop).
-                if web_rect is None:
-                    web_rect = _crop_web_block_from_full(
-                        capture.page, block["web_selectors"], web_path, web_block_path
-                    )
-
-                # Fallback 2: ratio slice of the full web page.
-                if web_rect is None:
-                    _crop_by_ratio_from_image(web_path, block["fallback_ratio"], web_block_path)
-
-                # --- Normalize to the SAME canvas (aspect preserving) before pixel diff.
-                norm_fig_block = norm_tmp / f"focused_{key}_{bkey}_norm_figma.png"
-                norm_web_block = norm_tmp / f"focused_{key}_{bkey}_norm_web.png"
-                _normalize_pair_for_compare(fig_block_path, web_block_path, norm_fig_block, norm_web_block)
-                block_similarity = comparator.calculate_similarity(norm_fig_block, norm_web_block)
-                comparator.generate_diff_image(norm_fig_block, norm_web_block, diff_block_path)
-
-                fig_size = Image.open(fig_block_path).size
-                web_size = Image.open(web_block_path).size
-                block_results.append(
-                    {
-                        "key": bkey,
-                        "label": block["label"],
-                        "similarity": float(block_similarity),
-                        "figma_path": str(fig_block_path),
-                        "web_path": str(web_block_path),
-                        "diff_path": str(diff_block_path),
-                        "figma_size": {"width": fig_size[0], "height": fig_size[1]},
-                        "web_size": {"width": web_size[0], "height": web_size[1]},
-                        "figma_layer_name": figma_layer_name,
-                        "web_rect": (
-                            {"x": web_rect[0], "y": web_rect[1], "w": web_rect[2], "h": web_rect[3]}
-                            if web_rect
-                            else None
-                        ),
-                    }
-                )
-
             figma_elements = figma_extractor.extract_semantic(scope_node, max_depth=Config.COMPARE_MAX_DEPTH)
             figma_elements = [
                 e for e in figma_elements
                 if e.width >= 12
                 and e.height >= 12
                 and not _NOISE_NAME_RE.match((e.name or "").strip())
-                and _element_in_boxes(e, figma_block_abs_boxes)
             ]
-            root_frame = next((e for e in figma_elements if e.node_type in ("FRAME", "COMPONENT")), None)
-            auto_map = auto_mapper.generate(figma_elements=figma_elements, page=capture.page, root_frame=root_frame)
+            # 让 AutoMapper 使用全量候选节点自动构建根坐标包围盒，
+            # 避免“首个 FRAME 非页面根”导致的大面积坐标偏移。
+            auto_map = auto_mapper.generate(figma_elements=figma_elements, page=capture.page, root_frame=None)
             dom_elements = dom_extractor.extract(capture.page, list(dict.fromkeys(auto_map.values())))
 
             result = element_compare.compare(
@@ -1918,7 +1993,6 @@ def run(template: str = "") -> Dict[str, Any]:
                 "site_url": page["site_url"],
                 "result": result,
                 "auto_mapped_count": len(auto_map),
-                "stable_blocks": block_results,
                 # 明确记录跳过的属性，供报告层展示说明
                 "skipped_props": sorted(skip_props),
                 "skipped_props_reason": (
@@ -1935,7 +2009,6 @@ def run(template: str = "") -> Dict[str, Any]:
                 },
             }
             ReportWriter._write_json(Config.REPORTS_DIR / "json" / f"element_diff_{key}.json", element_payload)
-            block_avg = round(sum(x["similarity"] for x in block_results) / len(block_results), 2) if block_results else 0.0
 
             # --- Functional check: links + buttons + console/network anomalies.
             # Details pages mostly re-expose the same header/footer/related
@@ -1984,24 +2057,32 @@ def run(template: str = "") -> Dict[str, Any]:
                         "diff_path": str(diff_path),
                         "compare_path": str(compare_path),
                     },
-                    "blocks": block_results,
-                    "block_avg_similarity": block_avg,
                     "element": result,
                     "top_diffs": _top_diff_items(result),
                     "function_check": function_check,
                 }
             )
 
+        # 组合流程验证：首页 -> 分类 -> 详情 -> 回首页/回分类
+        try:
+            navigation_flows = _run_navigation_flows(capture.page, pages)
+        except Exception as exc:  # pragma: no cover - defensive
+            navigation_flows = [{
+                "name": "组合流程验证",
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "steps": [],
+            }]
+
     # Deduplicate link results across pages so the report stops repeating
     # the same Header/Footer nav links once per page.
-    function_agg = _aggregate_function_checks(element_pages)
+    function_agg = _aggregate_function_checks(element_pages, flows=navigation_flows)
 
     focused_run = {
         "version": version,
         "generated_at": datetime.now(UTC).isoformat(),
         "base_url": Config.BASE_URL,
         "compare_strategy": compare_strategy_cn,
-        "stable_blocks": [b["label"] for b in stable_blocks],
         "skip_props": sorted(skip_props),
         "skip_prop_labels": skip_prop_labels,
         "page_results": page_results,
@@ -2019,7 +2100,6 @@ def run(template: str = "") -> Dict[str, Any]:
         element_pages,
         function_agg,
         report_dir / "index.html",
-        stable_blocks,
         compare_note_html,
     )
     md_path = _render_markdown(
@@ -2054,9 +2134,9 @@ if __name__ == "__main__":
         description=(
             "聚焦 UI 对比。\n"
             "配置文件：config/focused_pages.json\n"
-            "  - games.figma_node 填写 → 自动运行游戏模板\n"
-            "  - news.figma_node  填写 → 自动运行资讯模板\n"
-            "  - 两个都填 → 同时运行两套，各自生成独立报告"
+            "  - 推荐使用最简 pages 列表（home/category/detail）\n"
+            "  - 默认运行该列表并输出 reports/focused_ui_report/\n"
+            "  - 可选 --template 仅用于兼容旧模板配置"
         ),
     )
     parser.add_argument(

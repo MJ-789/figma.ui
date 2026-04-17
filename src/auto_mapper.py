@@ -211,8 +211,10 @@ class AutoMapper:
     """
 
     # IoU 综合评分最低阈值：低于此值的匹配不纳入 element_map
-    # 0.3 表示要求 DOM 元素与 Figma 节点有至少 30% 的位置重叠（经验值）
-    MIN_SCORE = 0.3
+    # 经验上新闻类站点的文本块/卡片块结构更复杂，IoU 波动更大，
+    # 适当降低阈值可显著提升可匹配覆盖率，再由 ElementCompare 属性级
+    # 对比筛掉错误匹配。
+    MIN_SCORE = 0.18
 
     # 泛化兜底选择器黑名单：这些选择器匹配范围太宽，禁止作为最终映射结果
     # 它们可以在候选列表中出现但不作为最终答案，防止整个 <div> 或 <section> 误匹配
@@ -246,10 +248,31 @@ class AutoMapper:
             - TEXT 节点：坐标位置命中的 DOM 元素，选择器为注入的唯一 data-figma-t-N 属性
             - 非 TEXT 节点：IoU 得分 > MIN_SCORE 的可信映射（非泛化选择器）
         """
-        if root_frame is None:
-            root_frame = next(
-                (e for e in figma_elements if e.node_type in ("FRAME", "COMPONENT")),
-                None,
+        if root_frame is None and figma_elements:
+            # 不再依赖“第一个 FRAME”作为根坐标系（可能是随机子容器），
+            # 改为按所有候选元素包围盒构造稳定根坐标。
+            min_x = min(e.x for e in figma_elements)
+            min_y = min(e.y for e in figma_elements)
+            max_x = max(e.x + e.width for e in figma_elements)
+            max_y = max(e.y + e.height for e in figma_elements)
+            root_frame = FigmaElement(
+                id="__auto_root__",
+                name="__auto_root__",
+                node_type="FRAME",
+                x=float(min_x),
+                y=float(min_y),
+                width=float(max(1.0, max_x - min_x)),
+                height=float(max(1.0, max_y - min_y)),
+                fill_color=None,
+                stroke_color=None,
+                border_radius=None,
+                font_family=None,
+                font_size=None,
+                font_weight=None,
+                line_height=None,
+                text_content=None,
+                opacity=1.0,
+                children_count=0,
             )
 
         # 获取页面尺寸，用于归一化 DOM 坐标（含滚动高度）
@@ -259,6 +282,7 @@ class AutoMapper:
         id_element_map: Dict[str, str] = {}
         seen_selectors: set = set()  # 防止同一 CSS 选择器被多个 Figma 节点共用
         text_idx = 0                 # TEXT 节点注入的 data-figma-t-N 属性编号，全局唯一
+        node_idx = 0                 # 非 TEXT 节点注入的 data-figma-n-N 属性编号
 
         for elem in figma_elements:
 
@@ -284,8 +308,10 @@ class AutoMapper:
                 continue
 
             # ── 非 TEXT 节点：候选选择器 + IoU 评分
+            attr_name = f"data-figma-n-{node_idx}"
+            node_idx += 1
             selector, score = self._find_best_selector(
-                elem, page, root_frame, page_size
+                elem, page, root_frame, page_size, attr_name
             )
 
             if (
@@ -309,6 +335,7 @@ class AutoMapper:
         page,
         root_frame: Optional[FigmaElement],
         page_size: Tuple[float, float],
+        attr_name: str,
     ) -> Tuple[Optional[str], float]:
         """
         对单个 Figma 节点找最佳匹配选择器。
@@ -321,7 +348,7 @@ class AutoMapper:
             return None, 0.0
 
         scored = self._score_candidates(
-            candidates, figma_elem, page, root_frame, page_size
+            candidates, figma_elem, page, root_frame, page_size, attr_name
         )
 
         if not scored:
@@ -568,6 +595,7 @@ class AutoMapper:
         page,
         root_frame: Optional[FigmaElement],
         page_size: Tuple[float, float],
+        attr_name: str,
     ) -> List[Tuple[str, float]]:
         """
         对每个候选选择器：
@@ -587,20 +615,56 @@ class AutoMapper:
             try:
                 raw = page.evaluate(
                     """
-(selector) => {
-    const el = document.querySelector(selector);
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    const scrollY = window.pageYOffset || document.documentElement.scrollTop;
+([selector, attrName, figmaNorm]) => {
+    const nodes = Array.from(document.querySelectorAll(selector));
+    if (!nodes.length) return null;
+    const pageW = window.innerWidth || document.documentElement.clientWidth || 1;
+    const pageH = Math.max(
+        document.body.scrollHeight || 0,
+        document.documentElement.scrollHeight || 0,
+        document.body.offsetHeight || 0,
+        document.documentElement.offsetHeight || 0,
+        1
+    );
+    const iou = (a, b) => {
+        const ix1 = Math.max(a[0], b[0]);
+        const iy1 = Math.max(a[1], b[1]);
+        const ix2 = Math.min(a[2], b[2]);
+        const iy2 = Math.min(a[3], b[3]);
+        if (ix2 <= ix1 || iy2 <= iy1) return 0;
+        const inter = (ix2 - ix1) * (iy2 - iy1);
+        const areaA = Math.max(0, a[2]-a[0]) * Math.max(0, a[3]-a[1]);
+        const areaB = Math.max(0, b[2]-b[0]) * Math.max(0, b[3]-b[1]);
+        const union = areaA + areaB - inter;
+        return union > 0 ? inter / union : 0;
+    };
+    let best = null;
+    let bestIou = -1;
+    for (const el of nodes) {
+        const cs = window.getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        const absY = r.top + (window.pageYOffset || document.documentElement.scrollTop || 0);
+        const domNorm = [r.left / pageW, absY / pageH, (r.left + r.width) / pageW, (absY + r.height) / pageH];
+        const curIou = iou(figmaNorm, domNorm);
+        if (curIou > bestIou) {
+            bestIou = curIou;
+            best = { el, x: r.left, y: absY, w: r.width, h: r.height };
+        }
+    }
+    if (!best) return null;
+    best.el.setAttribute(attrName, "1");
     return {
-        x: r.left,
-        y: r.top + scrollY,
-        w: r.width,
-        h: r.height
+        selector: "[" + attrName + "]",
+        x: best.x,
+        y: best.y,
+        w: best.w,
+        h: best.h
     };
 }
 """,
-                    selector,
+                    [selector, attr_name, figma_norm],
                 )
             except Exception:
                 continue
@@ -622,7 +686,7 @@ class AutoMapper:
             iou = self._iou(figma_norm, dom_norm)
             # 存在即得 0.3 基础分，IoU 贡献 0.7
             score = iou * 0.7 + 0.3
-            scored.append((selector, round(score, 4)))
+            scored.append((raw.get("selector") or selector, round(score, 4)))
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored
