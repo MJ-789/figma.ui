@@ -64,6 +64,9 @@ class Config:
     # 截图统一存放在 reports/ 下，与差异图、JSON、HTML 集中在同一结果目录
     SCREENSHOTS_DIR = REPORTS_DIR / "screenshots"
 
+    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
+    ZHIPU_API_KEY  = os.getenv('ZHIPU_API_KEY', '').strip()
+
     FIGMA_ACCESS_TOKEN = os.getenv('FIGMA_ACCESS_TOKEN')
 
     # ── Figma 设计稿：两种配法，择一 ──────────────────

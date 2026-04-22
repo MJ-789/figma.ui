@@ -31,6 +31,7 @@ from PIL import Image
 Image.MAX_IMAGE_PIXELS = None  # 资讯长页面截图可能非常大，避免 PIL 误判为炸弹图而中断
 
 from config.config import Config
+from src.ai_analyzer import AIAnalyzer, render_ai_section_html
 from src.auto_mapper import AutoMapper
 from src.dom_extractor import DOMExtractor
 from src.element_compare import ElementCompare
@@ -397,6 +398,41 @@ def _img_src(path: str) -> str:
     if not p.exists():
         return ""
     return p.name
+
+
+def _embed_html_images(html_path: Path) -> Path:
+    """把 HTML 里所有本地图片替换为 base64 Data URI，生成单文件可独立分发的版本。
+
+    输入：  reports/focused_ui_report/index.html
+    输出：  reports/focused_ui_report/index_standalone.html  （发给别人只需这一个文件）
+    """
+    import base64
+    import mimetypes
+    import re as _re
+
+    report_dir = html_path.parent
+    html = html_path.read_text(encoding="utf-8")
+
+    def _replace_src(m: "re.Match") -> str:  # type: ignore[name-defined]
+        src = m.group(1)
+        # 跳过已经是 data URI 或远程链接的图片
+        if src.startswith(("data:", "http://", "https://", "//")):
+            return m.group(0)
+        img_path = report_dir / src
+        if not img_path.exists():
+            return m.group(0)
+        mime, _ = mimetypes.guess_type(str(img_path))
+        mime = mime or "image/png"
+        b64 = base64.b64encode(img_path.read_bytes()).decode()
+        return f'src="data:{mime};base64,{b64}"'
+
+    embedded = _re.sub(r'src="([^"]+)"', _replace_src, html)
+
+    out_path = html_path.parent / "index_standalone.html"
+    out_path.write_text(embedded, encoding="utf-8")
+    size_kb = out_path.stat().st_size // 1024
+    print(f"[OK] Standalone report (images embedded): {out_path}  ({size_kb} KB)")
+    return out_path
 
 
 def _force_remove(path: Path) -> bool:
@@ -874,6 +910,38 @@ def _goto_page_robust(page, url: str, timeout_ms: int = 30000) -> None:
             return
         except Exception:
             raise
+
+
+def _scroll_and_wait_images(page, step: int = 600, pause_ms: int = 300,
+                             max_scroll_px: int = 15000) -> None:
+    """Scroll down the page in steps to trigger lazy-loaded images,
+    then wait for <img> elements to finish loading.
+
+    max_scroll_px caps travel so infinite-scroll sites do not loop forever.
+    """
+    pos = 0
+    for _ in range(max_scroll_px // step + 1):
+        next_pos = pos + step
+        page.evaluate(f"window.scrollTo(0, {next_pos})")
+        page.wait_for_timeout(pause_ms)
+        actual = page.evaluate("window.scrollY")
+        if actual <= pos:
+            break  # Reached the bottom (can't scroll further)
+        pos = actual
+        if pos >= max_scroll_px:
+            break
+
+    # Wait until every <img> in the DOM reports complete=true (max 8s).
+    try:
+        page.wait_for_function(
+            """() => {
+                const imgs = Array.from(document.querySelectorAll('img'));
+                return imgs.length === 0 || imgs.every(img => img.complete);
+            }""",
+            timeout=8000,
+        )
+    except Exception:
+        pass  # Proceed even if some images are still loading
 
 
 def _normalize_abs_url(url: str) -> str:
@@ -1496,6 +1564,8 @@ def _render_html(
     output_path: Path,
     compare_note_html: str,
     design_entry_url: str,
+    ai_results: Optional[Dict[str, Any]] = None,
+    ai_backend_name: str = "AI",
 ) -> Path:
     page_rows = []
     # 重点展示用户关心的元素级差异：尺寸 + 颜色 + 字体关键项 + 未匹配。
@@ -1595,6 +1665,9 @@ def _render_html(
 </section>
 """
 
+    # AI 视觉分析块（有结果时追加在规则引擎统计后面）
+    gemini_block = render_ai_section_html(ai_results, backend_name=ai_backend_name) if ai_results else ""
+
     module_ai_html = f"""
 <section class="card">
   <h2>③ AI 对比分析模块</h2>
@@ -1602,6 +1675,7 @@ def _render_html(
   {overview_tables}
   {function_section_html}
 </section>
+{gemini_block}
 """
 
     cards = []
@@ -1975,9 +2049,11 @@ def run(template: str = "") -> Dict[str, Any]:
             root_box = _node_box(scope_node) or _node_box(node_json)
             design_w = int(round(root_box[2])) if root_box else Config.AGENT_VIEWPORT_WIDTH
             design_h = int(round(root_box[3])) if root_box else Config.AGENT_VIEWPORT_HEIGHT
-            # Cap viewport width so we do not launch absurd viewports on large designs.
+            # Width: cap at 2560 to avoid absurd horizontal viewports.
+            # Height: match the Figma design height exactly so the web screenshot
+            # covers the same region. Cap at 8000px as a sanity guard only.
             viewport_w = max(360, min(design_w, 2560))
-            viewport_h = max(600, min(design_h, 2200))
+            viewport_h = max(600, min(design_h, 8000))
 
             # 2) Export full node at scale=1, then crop to selected page scope
             #    when needed. This fixes "one node contains multiple pages".
@@ -1997,13 +2073,16 @@ def run(template: str = "") -> Dict[str, Any]:
 
             # 3) Capture the site at the Figma-aligned viewport width.
             capture.page.set_viewport_size({"width": viewport_w, "height": viewport_h})
-            _goto_page_robust(capture.page, page["site_url"], timeout_ms=30000)
+            _goto_page_robust(capture.page, page["site_url"], timeout_ms=45000)
             if Config.AGENT_HIDE_SELECTORS:
                 capture.hide_elements(Config.AGENT_HIDE_SELECTORS)
-            # Scroll to top so sticky/lazy elements render at their "initial" state,
-            # which is what the Figma design typically portrays.
+            # Scroll only within the Figma viewport height to trigger
+            # lazy-loaded images without triggering infinite-scroll pagination.
+            # Then return to top and capture exactly the viewport area.
+            _scroll_and_wait_images(capture.page, max_scroll_px=viewport_h)
             capture.page.evaluate("window.scrollTo(0, 0)")
-            capture.page.screenshot(path=str(web_path), full_page=True)
+            capture.page.wait_for_timeout(800)
+            capture.page.screenshot(path=str(web_path), full_page=False)
 
             # 4) Full-page comparison -- normalize canvases so aspect ratios stay intact.
             norm_fig_path = norm_tmp / f"focused_{key}_norm_figma.png"
@@ -2176,6 +2255,20 @@ def run(template: str = "") -> Dict[str, Any]:
     ReportWriter._write_json(json_dir / f"{json_prefix}element_diffs.json", {"pages": element_pages})
     ReportWriter._write_json(json_dir / f"{json_prefix}function_global.json", function_agg)
 
+    # ── AI 视觉分析（截图生成后，报告渲染前）────────────────────────────
+    ai_results: Dict[str, Any] = {}
+    _ai_backend_name = "AI"
+    try:
+        analyzer = AIAnalyzer()
+        if analyzer.enabled:
+            _ai_backend_name = analyzer.backend_name
+            print(f"\n[AI] 正在调用 {_ai_backend_name} 分析各页面截图 ...")
+            ai_results = analyzer.analyze_pages(pages, report_dir)
+        else:
+            print("[AI] 未配置可用 AI Key，跳过 AI 分析")
+    except Exception as _ai_err:
+        print(f"[AI] 分析异常（不影响报告生成）: {_ai_err}")
+
     # Write HTML + Markdown INSIDE the self-contained folder so it can be
     # zipped / mailed in one shot (every <img> points to a sibling file).
     html_path = _render_html(
@@ -2184,6 +2277,8 @@ def run(template: str = "") -> Dict[str, Any]:
         report_dir / "index.html",
         compare_note_html,
         Config.FIGMA_DESIGN_URL or "",
+        ai_results=ai_results,
+        ai_backend_name=_ai_backend_name,
     )
     md_path = _render_markdown(
         element_pages,
@@ -2229,11 +2324,21 @@ if __name__ == "__main__":
         default="",
         help="强制只跑指定模板（games / news）。不传则自动运行所有已配置模板。",
     )
+    parser.add_argument(
+        "--embed",
+        action="store_true",
+        default=False,
+        help=(
+            "生成独立单文件报告 index_standalone.html，所有图片内嵌为 base64，"
+            "发给别人只需这一个 HTML 文件，无需附带任何图片。"
+        ),
+    )
     args = parser.parse_args()
 
+    results: list = []
     if args.template:
         # 明确指定模板：只跑一套
-        run(template=args.template)
+        results.append(run(template=args.template))
     else:
         # 自动检测：读配置，看哪些模板填了 figma_node 就跑哪些
         try:
@@ -2257,7 +2362,15 @@ if __name__ == "__main__":
                 )
                 sys.exit(1)
             for _tmpl in _enabled:
-                run(template=_tmpl)
+                results.append(run(template=_tmpl))
         else:
             # 旧平铺格式：直接跑
-            run()
+            results.append(run())
+
+    # --embed：把所有刚生成的 index.html 转成单文件版本
+    if args.embed:
+        print("\n[--embed] 正在将图片内嵌至 HTML …")
+        for r in results:
+            html_file = Path(r.get("html_report", ""))
+            if html_file.exists():
+                _embed_html_images(html_file)

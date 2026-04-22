@@ -4,23 +4,23 @@
     {
       "key": "home",
       "label": "Home",
-      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=14758-990&m=dev",
+      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=16011-75&m=dev",
       "strict_figma_node": true,
       "site_path": "/"
     },
     {
       "key": "category",
       "label": "Category",
-      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=14758-1261&m=dev",
+      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=16019-767&m=dev",
       "strict_figma_node": true,
-      "site_path": "/list/Mental Illness"
+      "site_path": "/list/ParentsKids"
     },
     {
       "key": "details",
       "label": "Details",
-      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=14758-1456&m=dev",
+      "figma_url": "https://www.figma.com/design/fYPLGfJU35LLvqgBvUQ1bG/%E8%B5%84%E8%AE%AF%E7%AB%99?node-id=16019-1439&m=dev",
       "strict_figma_node": true,
-      "site_path": "/cold-water-swimming-finnish-method-for-mental-calmness"
+      "site_path": "/millennial-items-that-amuse-gen-alpha-gen-z"
     }
   ]
 }
